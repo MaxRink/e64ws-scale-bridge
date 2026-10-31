@@ -81,7 +81,7 @@ The four Xenia routes are unchanged; the HMI sees the ESP state through
 ## Implemented in dev
 
 - `build.sh gateway` builds the BLE-central gateway image
-  (`build/fwgateway/build/Ng2EspApp.bin`, 1,235,392 bytes; ~20.6 KB IRAM free).
+  (`build/fwgateway/build/Ng2EspApp.bin`, 1,234,160 bytes; ~20.6 KB IRAM free).
 - `src/main/ScaleGateway.{h,cpp}` is a dependency-free parser, shot detector
   and state serializer. `tests/run_scale_gateway_test.sh` compiles and runs its
   host tests.
