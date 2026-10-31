@@ -54,9 +54,14 @@ $live_grams = $number($body['live_grams'] ?? 0, 'live_grams');
 $flow_g_s = $number($body['flow_g_s'] ?? 0, 'flow_g_s');
 $active_ms = (int) $number($body['active_ms'] ?? 0, 'active_ms');
 $shot_count = (int) $number($body['shot_count'] ?? 0, 'shot_count');
-$finishing_until = (int) $number($body['finishing_until_ms'] ?? 0, 'finishing_until_ms');
-if ($phase === 'finishing' && $finishing_until === 0) {
-    $finishing_until = scale_bridge_now_ms() + 3000;
+// The ESP32's clock is milliseconds since boot, not the PHP epoch.  Use the
+// server clock for the finishing window so the HMI/GBS comparison is valid.
+$finishing_until = 0;
+if ($phase === 'finishing') {
+    $config = scale_bridge_config();
+    $window = (int) ($config['finishing_ms'] ?? 3000);
+    if ($window < 1000) $window = 1000;
+    $finishing_until = scale_bridge_now_ms() + $window;
 }
 $last = $body['last_shot'] ?? null;
 if ($last !== null) {

@@ -179,9 +179,16 @@ Xenia. The existing **Xenia Diagnosis** screen then shows:
 
 Navigation: **Machine To Machine → Enable XENIA → Diagnosis**; **Configuration
 → Edit Host** to set `127.0.0.1` or the grinder's LAN IP. No QML patch is
-needed for this view. The QEMU HMI was blocked by its expected "Security data
-missing" modal, so the final screen interaction is documented from the driver
-contract, not yet observed end-to-end.
+needed for this view.
+
+Rendered from the vendor QML with the bridge values:
+
+![Xenia diagnosis top](assets/ondevice-xenia-diagnosis-top.png)
+![Xenia diagnosis metrics](assets/ondevice-xenia-diagnosis-metrics.png)
+
+These renders use the extracted vendor QML with the bridge values; the live
+QEMU HMI was blocked by its expected "Security data missing" modal, so the
+end-to-end panel interaction is not yet observed.
 
 This gives a two-device setup with no HMI modification:
 

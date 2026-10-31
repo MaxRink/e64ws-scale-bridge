@@ -238,6 +238,30 @@ class OnDevicePhpTests(unittest.TestCase):
         self.assertEqual(value["PU_SENS_FLOW_METER_FLOWRATE"], 1.3)
         self.assertEqual(value["script"], "SCALE")
 
+    def test_esp_finishing_uses_server_clock(self) -> None:
+        status, _ = _request(
+            self.base, "POST", "/api/v2/ingest",
+            {
+                "source": "esp32-ble",
+                "phase": "finishing",
+                "live_grams": 18.0,
+                "flow_g_s": 0.0,
+                "active_ms": 0,
+                "shot_count": 1,
+                "last_shot": {
+                    "mass_g": 18.0, "duration_ms": 18400,
+                    "valid": True, "reason": "stable", "at_ms": 22000,
+                },
+            },
+            headers={"X-Scale-Token": "test-token"},
+        )
+        self.assertEqual(status, 200)
+        _, raw = _request(self.base, "GET", "/api/v2/mako")
+        value = json.loads(raw)
+        self.assertEqual(value["MA_STATUS"], 4)
+        self.assertEqual(value["REAL_EXTRACTION_TIME_MS"], 18400)
+        self.assertEqual(value["PU_SENS_FLOW_METER_VOLUME"], 18.0)
+
     def test_esp_ingest_requires_token_and_valid_phase(self) -> None:
         status, _ = _request(
             self.base, "POST", "/api/v2/ingest",

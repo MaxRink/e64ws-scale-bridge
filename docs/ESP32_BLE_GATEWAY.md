@@ -78,6 +78,45 @@ Rules:
 The four Xenia routes are unchanged; the HMI sees the ESP state through
 `/api/v2/mako` exactly as it sees the WiFi daemon.
 
+## Implemented in dev
+
+- `build.sh gateway` builds the BLE-central gateway image
+  (`build/fwgateway/build/Ng2EspApp.bin`, 1,235,392 bytes; ~20.6 KB IRAM free).
+- `src/main/ScaleGateway.{h,cpp}` is a dependency-free parser, shot detector
+  and state serializer. `tests/run_scale_gateway_test.sh` compiles and runs its
+  host tests.
+- `src/main/BleScaleGateway.{h,cpp}` is the NimBLE-central + HTTP transport.
+  It is compiled and linked; no BLE/radio test has been run.
+- `tools/esp32_gateway_sim.py` simulates the ESP32 HTTP side against the E64
+  `/api/v2/ingest` endpoint.
+
+Build and host-test:
+
+```sh
+cd tools/rebuild/esp-app/recon
+ROOT=$PWD ./build.sh gateway
+./tests/run_scale_gateway_test.sh
+# from the research repo root: python3 tools/esp_ble_client.py --help
+```
+
+Dev ingest simulation (after installing the bridge on the E64):
+
+```sh
+python3 tools/esp32_gateway_sim.py --host 127.0.0.1 --port 28082 \
+  --token "$(ssh ... cat /db/scale-bridge/config.json | jq -r .ingest_token)" \
+  --synthetic --speed 20 --once
+```
+
+Then `GET /api/v2/mako` should show the simulated Output Amount, Flow Rate and
+Real Extraction Time. QEMU returned `MA_STATUS=4`,
+`REAL_EXTRACTION_TIME_MS=18400`, `PU_SENS_FLOW_METER_VOLUME=18` for an 18 g
+simulated shot. The simulator is transport-only; it does not prove BLE.
+
+The vendor HMI rendered the same values in `CmXeniaDiagnosis`:
+`Output Amount 18g`, `Flow Rate 0g/s`, `Real Extraction Time 18400ms`,
+`Script SCALE` (see `docs/assets/ondevice-xenia-diagnosis-metrics.png`). The
+screenshot comes from the QML stub, not a physical panel.
+
 ## Firmware plan
 
 Add a feature-gated `ble-gateway` build, preserving the existing UART/SDIO/LED/
