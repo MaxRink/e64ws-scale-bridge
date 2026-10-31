@@ -74,8 +74,7 @@ command closes the connection. The practical stock options are:
 no BLE scale client and the official app has no Bluetooth permission. The
 official scale is Wi-Fi/cloud and serial-bound.
 
-See [docs/STOCK_OPTIONS.md](docs/STOCK_OPTIONS.md) and
-[docs/GUIDE.md](docs/GUIDE.md).
+See [docs/STOCK_OPTIONS.md](docs/STOCK_OPTIONS.md), [docs/XENIA_GUIDE.md](docs/XENIA_GUIDE.md), [docs/OWNER_CLOUD_EVENT.md](docs/OWNER_CLOUD_EVENT.md) and [docs/GUIDE.md](docs/GUIDE.md).
 
 The companion Decaid plugin (read-only grinder telemetry) is
 [MaxRink/decaid-e64ws-plugin](https://github.com/MaxRink/decaid-e64ws-plugin);
