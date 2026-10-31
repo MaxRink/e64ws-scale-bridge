@@ -86,6 +86,7 @@ say "Installing code to $DEST"
 run install -d "$DEST/ondevice" "$DEST/tools"
 run install -m 0755 "$ROOT/ondevice/scalebridged.py" "$DEST/ondevice/scalebridged.py"
 run install -m 0755 "$ROOT/ondevice/patch_lighttpd.py" "$DEST/ondevice/patch_lighttpd.py"
+run install -m 0755 "$ROOT/ondevice/uninstall.sh" "$DEST/ondevice/uninstall.sh"
 for file in scale_bridge.py openscale_client.py e64ws_protocol.py __init__.py; do
     if [ -f "$ROOT/tools/$file" ]; then
         run install -m 0644 "$ROOT/tools/$file" "$DEST/tools/$file"
