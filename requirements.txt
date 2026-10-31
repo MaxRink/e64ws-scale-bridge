@@ -1,0 +1,4 @@
+# Required for E64 WSS and OpenScale Wi-Fi.
+websocket-client>=1.8
+# Optional, only for --ble.
+bleak>=0.22; python_version < "4"
