@@ -76,6 +76,27 @@ official scale is Wi-Fi/cloud and serial-bound.
 
 See [docs/ESP32_SCALE.md](docs/ESP32_SCALE.md), [docs/STOCK_OPTIONS.md](docs/STOCK_OPTIONS.md), [docs/XENIA_GUIDE.md](docs/XENIA_GUIDE.md), [docs/OWNER_CLOUD_EVENT.md](docs/OWNER_CLOUD_EVENT.md) and [docs/GUIDE.md](docs/GUIDE.md).
 
+## On-device bridge (rooted E64)
+
+The WiFi bridge can run **on the grinder itself** on a rooted unit. A
+dependency-free daemon reads `ws://<scale>/snapshot`, detects a shot, and
+writes live state. PHP serves the four Xenia routes from the grinder's own web
+root, so the E64 M2M client can point at `127.0.0.1` or the grinder's LAN
+address. The vendor HMI is not patched; the stock M2M screen is the display.
+
+```sh
+./ondevice/install.sh --dry-run
+./ondevice/install.sh          # as root, after unlockrfs/unlockapp
+vi /db/scale-bridge/config.json
+/etc/init.d/S95scalebridge restart
+# open http://<grinder>/scale/
+```
+
+This path is rooted-stock, not stock no-root, and it does **not** add BLE to
+the E64. GBS consumption of the Xenia extraction time is still the physical
+A/B gate. See [docs/ON_DEVICE_INSTALL.md](docs/ON_DEVICE_INSTALL.md) and the
+feasibility report [ON_DEVICE_SCALE_BRIDGE.md](https://github.com/MaxRink/mahlkoenig-e64ws-local-research/blob/main/docs/ON_DEVICE_SCALE_BRIDGE.md).
+
 The companion Decaid plugin (read-only grinder telemetry) is
 [MaxRink/decaid-e64ws-plugin](https://github.com/MaxRink/decaid-e64ws-plugin);
 the assisted dial-in plugin is
@@ -87,8 +108,10 @@ the assisted dial-in plugin is
 python3 -m unittest discover -s tests -v
 ```
 
-16 tests cover the Decent/generic parsers, shot detection, event units and the
-Xenia emulator routes. The bridge was also exercised against the QEMU E64: an
+47 Python tests cover the Decent/generic parsers, shot detection, event units,
+the Xenia emulator routes and the on-device daemon. Seven PHP 8.4 tests cover
+the on-device Xenia endpoints and WebUI page (`./tools/run_php_tests.sh`). The
+bridge was also exercised against the QEMU E64: an
 18 g / 24.6 s replay produced `brewTimeMs=24600`, `brewWeightMg=18000`,
 `validity=true`, and `AddBrewEvent` returned `{"success": true}` in development
 mode.

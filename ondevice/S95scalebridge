@@ -1,0 +1,56 @@
+#!/bin/sh
+#
+# On-device scale bridge (OpenScale/HDS -> Xenia state).
+# Runs after lighttpd and the vendor app; drops root itself.
+
+NAME=scalebridged
+DAEMON=/storage/scale-bridge/ondevice/scalebridged.py
+CONFIG=/db/scale-bridge/config.json
+PID_FILE=/run/scale-bridge/scalebridged.pid
+LOG_FILE=/log/scalebridged.log
+
+start() {
+    printf "Starting %s: " "$NAME"
+    mkdir -p /run/scale-bridge
+    if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+        echo "already running"
+        return 0
+    fi
+    if [ ! -x /usr/bin/python3 ] || [ ! -r "$DAEMON" ]; then
+        echo "missing python3 or $DAEMON"
+        return 1
+    fi
+    # The daemon reads the config first, then drops to www-data.  The state,
+    # brew-ratio and shot directories are owned by www-data by the installer.
+    start-stop-daemon -S -q -b -m -p "$PID_FILE" -x /usr/bin/python3 -- \
+        "$DAEMON" --config "$CONFIG" --user www-data --verbose >>"$LOG_FILE" 2>&1
+    echo "OK"
+}
+
+stop() {
+    printf "Stopping %s: " "$NAME"
+    start-stop-daemon -K -q -p "$PID_FILE"
+    echo "OK"
+}
+
+status() {
+    if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+        echo "$NAME running (pid $(cat "$PID_FILE"))"
+        return 0
+    fi
+    echo "$NAME not running"
+    return 1
+}
+
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    restart) stop; sleep 1; start ;;
+    status) status ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 1
+        ;;
+esac
+
+exit $?

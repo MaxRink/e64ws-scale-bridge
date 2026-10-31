@@ -42,7 +42,6 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping
 
 try:  # package mode (repo root) and script mode (tools/ on sys.path)
-    from tools.e64ws_client import login, run_request
     from tools.e64ws_protocol import E64WSProtocol
     from tools.openscale_client import (
         OpenScaleClient,
@@ -51,7 +50,6 @@ try:  # package mode (repo root) and script mode (tools/ on sys.path)
         OpenScaleTypedFrame,
     )
 except ModuleNotFoundError:  # pragma: no cover - direct script execution
-    from e64ws_client import login, run_request
     from e64ws_protocol import E64WSProtocol
     from openscale_client import (
         OpenScaleClient,
@@ -59,6 +57,21 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution
         OpenScaleSnapshot,
         OpenScaleTypedFrame,
     )
+
+
+def _e64_client():
+    """Import the TLS/WSS client lazily.
+
+    The on-device daemon imports this module for the detector only.  The E64's
+    Python 3.10 has no ssl module, so a top-level import would make the module
+    unusable there.
+    """
+
+    try:
+        from tools.e64ws_client import login, run_request
+    except ModuleNotFoundError:  # pragma: no cover - direct script execution
+        from e64ws_client import login, run_request
+    return login, run_request
 
 DECENT_SERVICE = "0000fff0-0000-1000-8000-00805f9b34fb"
 DECENT_NOTIFY = "0000fff4-0000-1000-8000-00805f9b34fb"
@@ -154,6 +167,18 @@ class ShotDetector:
         self._start_ms = 0.0
         self._start_g = 0.0
         self._peak_g = 0.0
+
+    @property
+    def active(self) -> bool:
+        """True between shot start and shot end."""
+
+        return self._active
+
+    @property
+    def start_ms(self) -> float:
+        """Scale timestamp of the current/last shot start (0 when idle)."""
+
+        return self._start_ms
 
     def _idle_baseline(self) -> float:
         if self._baseline is None:
@@ -413,6 +438,7 @@ def send_add_brew_event(
 ) -> dict[str, Any]:
     protocol = E64WSProtocol()
     message = protocol.action("AddBrewEvent", dict(event))
+    _, run_request = _e64_client()
     return run_request(
         host,
         token,
@@ -446,6 +472,7 @@ def _token_for(args: argparse.Namespace) -> str:
     password = args.password
     if password is None:
         password = getpass.getpass("local grinder password: ")
+    login, _ = _e64_client()
     return login(
         args.grinder,
         args.login_role,
