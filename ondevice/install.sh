@@ -104,16 +104,20 @@ if [ ! -e "$DB/config.json" ]; then
     if [ "$DRY_RUN" = 1 ]; then
         say "  + default config (host hds.local, port 80, /snapshot)"
     else
-        cat > "$DB/config.json" <<'EOF'
+        TOKEN=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' || true)
+        cat > "$DB/config.json" <<EOF
 {
   "host": "hds.local",
   "port": 80,
   "path": "/snapshot",
   "timeout": 10,
-  "finishing_ms": 3000
+  "finishing_ms": 3000,
+  "ingest_token": "$TOKEN"
 }
 EOF
+        chmod 0640 "$DB/config.json"
         chown www-data:www-data "$DB/config.json" 2>/dev/null || true
+        say "ESP32 BLE ingest token written to $DB/config.json"
     fi
 else
     say "Keeping existing $DB/config.json"

@@ -134,7 +134,14 @@ class OnDeviceDaemonTests(unittest.TestCase):
             self.assertAlmostEqual(last["mass_g"], 18.0, places=1)
             self.assertGreaterEqual(last["duration_ms"], 1000)
             self.assertTrue(state_path.is_file())
-            persisted = json.loads(state_path.read_text())
+            # The writer is throttled; wait for the forced shot write.
+            persisted = {}
+            deadline = time.time() + 2
+            while time.time() < deadline:
+                persisted = json.loads(state_path.read_text())
+                if persisted.get("shot_count") == state["shot_count"]:
+                    break
+                time.sleep(0.02)
             self.assertEqual(persisted["schema"], 1)
             self.assertEqual(persisted["shot_count"], state["shot_count"])
             lines = shots_path.read_text().strip().splitlines()

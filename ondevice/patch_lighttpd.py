@@ -47,8 +47,8 @@ $HTTP["scheme"] == "http" {{
         }}
     }}
 }}
-$HTTP["url"] =~ "^/api/v2/(mako|machine|brewratio|scripts/execute)$" {{
-    url.rewrite-once = ( "^/api/v2/(mako|machine|brewratio|scripts/execute)$" => "/api/v2/$1/index.php" )
+$HTTP["url"] =~ "^/api/v2/(mako|machine|brewratio|scripts/execute|ingest)$" {{
+    url.rewrite-once = ( "^/api/v2/(mako|machine|brewratio|scripts/execute|ingest)$" => "/api/v2/$1/index.php" )
 }}
 {END}'''
 
@@ -56,7 +56,18 @@ $HTTP["url"] =~ "^/api/v2/(mako|machine|brewratio|scripts/execute)$" {{
 def patch(config: Path, backup: Path) -> int:
     text = config.read_text()
     if BEGIN in text:
-        print("lighttpd config already patched")
+        if PATCH in text:
+            print("lighttpd config already patched")
+            return 0
+        updated = re.sub(
+            re.escape(BEGIN) + r".*?" + re.escape(END),
+            PATCH,
+            text,
+            count=1,
+            flags=re.DOTALL,
+        )
+        config.write_text(updated)
+        print("updated existing lighttpd patch block")
         return 0
     patched, count = REDIRECT.subn(PATCH, text, count=1)
     if count != 1:

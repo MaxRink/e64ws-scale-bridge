@@ -34,6 +34,17 @@ class LighttpdPatchTests(unittest.TestCase):
             self.assertEqual(patch(config, backup), 0)
             self.assertEqual(text, config.read_text())
 
+    def test_upgrades_an_older_marked_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "lighttpd.conf"
+            backup = Path(tmp) / "lighttpd.conf.vendor"
+            config.write_text(VENDOR)
+            self.assertEqual(patch(config, backup), 0)
+            old = config.read_text().replace("|ingest", "")
+            config.write_text(old)
+            self.assertEqual(patch(config, backup), 0)
+            self.assertIn("|ingest", config.read_text())
+
     def test_restore_returns_vendor_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "lighttpd.conf"

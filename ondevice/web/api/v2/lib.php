@@ -13,11 +13,34 @@ declare(strict_types=1);
 const SCALE_BRIDGE_STATE_DEFAULT = '/run/scale-bridge/state.json';
 const SCALE_BRIDGE_RATIO_DEFAULT = '/run/scale-bridge/brewratio.json';
 const SCALE_BRIDGE_BREW_START_DEFAULT = '/run/scale-bridge/brew-start.json';
+const SCALE_BRIDGE_CONFIG_DEFAULT = '/db/scale-bridge/config.json';
+const SCALE_BRIDGE_ESP_STATE_DEFAULT = '/run/scale-bridge/esp-state.json';
+const SCALE_BRIDGE_ESP_FRESH_MS = 5000;
 
 function scale_bridge_env_path(string $name, string $default): string
 {
     $value = getenv($name);
     return is_string($value) && $value !== '' ? $value : $default;
+}
+
+function scale_bridge_config_path(): string
+{
+    return scale_bridge_env_path('SCALE_BRIDGE_CONFIG', SCALE_BRIDGE_CONFIG_DEFAULT);
+}
+
+function scale_bridge_config(): array
+{
+    return scale_bridge_read_json(scale_bridge_config_path());
+}
+
+function scale_bridge_ingest_token(): string
+{
+    $token = scale_bridge_env_path('SCALE_BRIDGE_INGEST_TOKEN', '');
+    if ($token !== '') {
+        return $token;
+    }
+    $config = scale_bridge_config();
+    return is_string($config['ingest_token'] ?? null) ? $config['ingest_token'] : '';
 }
 
 function scale_bridge_state_path(): string
@@ -72,6 +95,30 @@ function scale_bridge_write_json(string $path, array $value): bool
     return @rename($tmp, $path);
 }
 
+function scale_bridge_esp_state_path(): string
+{
+    return scale_bridge_env_path('SCALE_BRIDGE_ESP_STATE', SCALE_BRIDGE_ESP_STATE_DEFAULT);
+}
+
+function scale_bridge_esp_state(): ?array
+{
+    $path = scale_bridge_esp_state_path();
+    if (!is_file($path) || !is_readable($path)) {
+        return null;
+    }
+    $value = scale_bridge_read_json($path);
+    if ($value === []) {
+        return null;
+    }
+    $updated = (int) ($value['updated_ms'] ?? 0);
+    $now = scale_bridge_now_ms();
+    $age = $now - $updated;
+    if ($age < 0 || $age > SCALE_BRIDGE_ESP_FRESH_MS) {
+        return null;
+    }
+    return $value;
+}
+
 function scale_bridge_state(): array
 {
     $default = [
@@ -90,6 +137,12 @@ function scale_bridge_state(): array
         'error' => '',
         'updated_ms' => 0,
     ];
+    // A fresh ESP32 BLE-gateway snapshot wins over the WiFi daemon. This lets
+    // one HMI/PHP surface serve either source without duplicating Xenia.
+    $esp = scale_bridge_esp_state();
+    if ($esp !== null) {
+        return array_merge($default, $esp);
+    }
     return array_merge($default, scale_bridge_read_json(scale_bridge_state_path()));
 }
 
@@ -107,15 +160,21 @@ function scale_bridge_mako(array $state, array $ratio): array
     $status = 1;
     $extraction = 0;
     $duration = 0;
+    $volume = 0.0;
+    $flow = 0.0;
 
     if ($phase === 'serving') {
         $status = 3;
         $extraction = 1;
+        $volume = (float) ($state['live_grams'] ?? 0.0);
+        $flow = (float) ($state['flow_g_s'] ?? 0.0);
+        $duration = max(0, (int) ($state['active_ms'] ?? 0));
     } elseif ($phase === 'finishing' && $last !== null) {
         $until = (int) ($state['finishing_until_ms'] ?? 0);
         if ($until > 0 && $now < $until) {
             $status = 4;
             $extraction = 2;
+            $volume = (float) ($last['mass_g'] ?? 0.0);
             $duration = max(0, (int) round((float) ($last['duration_ms'] ?? 0)));
         }
     }
@@ -124,11 +183,14 @@ function scale_bridge_mako(array $state, array $ratio): array
         'MA_STATUS' => $status,
         'MA_EXTRACTION_STATUS' => $extraction,
         'REAL_EXTRACTION_TIME_MS' => $duration,
-        'PU_SENS_FLOW_METER_VOLUME' => 0.0,
+        'PU_SENS_FLOW_METER_VOLUME' => round($volume, 3),
+        'PU_SENS_FLOW_METER_FLOWRATE' => round($flow, 3),
         'BG_SET_TEMP' => 93,
         'BG_SENS_TEMP' => 92,
         'TANK_LEVEL' => 1,
-        'script' => '',
+        // The vendor Xenia diagnosis screen labels this field "Script"; use it
+        // to identify the local scale source without inventing a coffee recipe.
+        'script' => 'SCALE',
         'TIMESTAMP' => scale_bridge_timestamp(),
         'MA_SYNC_BEVERAGE_WEIGHT' => (int) ($ratio['SYNC_BEVERAGE_WEIGHT'] ?? 0),
         'MA_SYNC_FILTER' => (int) ($ratio['SYNC_FILTER'] ?? 0),

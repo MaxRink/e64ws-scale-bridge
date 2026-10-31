@@ -212,6 +212,7 @@ class XeniaState:
                 "MA_EXTRACTION_STATUS": self.extraction_status,
                 "REAL_EXTRACTION_TIME_MS": self.extraction_time_ms,
                 "PU_SENS_FLOW_METER_VOLUME": round(self.flow_ml, 3),
+                "PU_SENS_FLOW_METER_FLOWRATE": 0.0,
                 "BG_SET_TEMP": 93,
                 "BG_SENS_TEMP": 92,
                 "TANK_LEVEL": 1,

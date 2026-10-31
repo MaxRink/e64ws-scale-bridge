@@ -233,6 +233,8 @@ class ScaleDaemon:
             "extraction_status": 0,
             "live_grams": 0.0,
             "live_ms": 0,
+            "flow_g_s": 0.0,
+            "active_ms": 0,
             "last_shot": None,
             "finishing_until_ms": 0,
             "shot_count": 0,
@@ -241,6 +243,8 @@ class ScaleDaemon:
             "updated_ms": now_ms(),
         }
         self._last_write = 0.0
+        self._last_sample: tuple[float, float] | None = None
+        self._flow_g_s = 0.0
 
     def log(self, message: str) -> None:
         if self.verbose:
@@ -299,6 +303,15 @@ class ScaleDaemon:
                 self._state["ma_status"] = 1
                 self._state["extraction_status"] = 0
         sample = ScaleSample(grams, milliseconds, source="openscale")
+        if self._last_sample is not None:
+            last_g, last_ms = self._last_sample
+            elapsed = (milliseconds - last_ms) / 1000.0
+            if elapsed > 0:
+                instant = max(0.0, (grams - last_g) / elapsed)
+                self._flow_g_s = instant if self._flow_g_s == 0.0 else (
+                    0.7 * self._flow_g_s + 0.3 * instant
+                )
+        self._last_sample = (grams, milliseconds)
         was_active = self.detector.active
         try:
             shot = self.detector.add(sample)
@@ -309,7 +322,9 @@ class ScaleDaemon:
             was_active = False
         if self.detector.active and not was_active:
             self._set(phase="serving", ma_status=3, extraction_status=1,
-                      live_grams=grams, live_ms=int(milliseconds))
+                      live_grams=grams, live_ms=int(milliseconds),
+                      flow_g_s=self._flow_g_s,
+                      active_ms=int(milliseconds - self.detector.start_ms))
         if shot is not None:
             payload = shot.as_dict()
             payload["at_ms"] = now_ms()
@@ -322,6 +337,9 @@ class ScaleDaemon:
                 self._state["finishing_until_ms"] = now_ms() + self.finishing_ms
                 self._state["live_grams"] = grams
                 self._state["live_ms"] = int(milliseconds)
+                self._state["flow_g_s"] = 0.0
+                self._state["active_ms"] = 0
+            self._flow_g_s = 0.0
             self._append_shot(payload)
             self._write_state(force=True)
             self.log(
@@ -329,7 +347,15 @@ class ScaleDaemon:
                 f"valid={shot.valid}, reason={shot.reason}"
             )
             return payload
-        self._set(live_grams=grams, live_ms=int(milliseconds))
+        self._set(
+            live_grams=grams,
+            live_ms=int(milliseconds),
+            flow_g_s=self._flow_g_s,
+            active_ms=(
+                int(milliseconds - self.detector.start_ms)
+                if self.detector.active else 0
+            ),
+        )
         return None
 
     def _read_once(self) -> None:

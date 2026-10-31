@@ -19,13 +19,23 @@ import urllib.request
 from pathlib import Path
 
 
-def _request(base: str, method: str, path: str, body: dict | None = None, timeout: float = 5.0):
+def _request(
+    base: str,
+    method: str,
+    path: str,
+    body: dict | None = None,
+    timeout: float = 5.0,
+    headers: dict[str, str] | None = None,
+):
     data = json.dumps(body).encode() if body is not None else None
+    request_headers = {"Content-Type": "application/json"} if data is not None else {}
+    if headers:
+        request_headers.update(headers)
     request = urllib.request.Request(
         base.rstrip("/") + path,
         data=data,
         method=method,
-        headers={"Content-Type": "application/json"} if data is not None else {},
+        headers=request_headers,
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -53,6 +63,8 @@ class OnDevicePhpTests(unittest.TestCase):
                 "SCALE_BRIDGE_STATE": str(cls.state_dir / "state.json"),
                 "SCALE_BRIDGE_RATIO": str(cls.state_dir / "brewratio.json"),
                 "SCALE_BRIDGE_BREW_START": str(cls.state_dir / "brew-start.json"),
+                "SCALE_BRIDGE_ESP_STATE": str(cls.state_dir / "esp-state.json"),
+                "SCALE_BRIDGE_INGEST_TOKEN": "test-token",
                 "SCALE_BRIDGE_NO_AUTH": "1",
             })
             cls.proc = subprocess.Popen(
@@ -73,6 +85,7 @@ class OnDevicePhpTests(unittest.TestCase):
         cls.state_path = cls.state_dir / "state.json"
         cls.ratio_path = cls.state_dir / "brewratio.json"
         cls.start_path = cls.state_dir / "brew-start.json"
+        cls.esp_path = cls.state_dir / "esp-state.json"
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -83,7 +96,7 @@ class OnDevicePhpTests(unittest.TestCase):
             cls.tmp.cleanup()
 
     def setUp(self) -> None:
-        for path in (self.state_path, self.ratio_path, self.start_path):
+        for path in (self.state_path, self.ratio_path, self.start_path, self.esp_path):
             path.unlink(missing_ok=True)
 
     def _state(self, **fields) -> None:
@@ -124,8 +137,12 @@ class OnDevicePhpTests(unittest.TestCase):
         self.assertEqual(value["REAL_EXTRACTION_TIME_MS"], 0)
         self.assertIsInstance(value["TIMESTAMP"], str)
         self.assertRegex(value["TIMESTAMP"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+        self.assertEqual(value["PU_SENS_FLOW_METER_VOLUME"], 0)
+        self.assertEqual(value["PU_SENS_FLOW_METER_FLOWRATE"], 0)
+        self.assertEqual(value["script"], "SCALE")
         for key in (
             "PU_SENS_FLOW_METER_VOLUME",
+            "PU_SENS_FLOW_METER_FLOWRATE",
             "BG_SET_TEMP",
             "BG_SENS_TEMP",
             "TANK_LEVEL",
@@ -137,10 +154,17 @@ class OnDevicePhpTests(unittest.TestCase):
             self.assertIn(key, value)
 
     def test_serving_and_finishing(self) -> None:
-        self._state(phase="serving", ma_status=3, extraction_status=1, live_grams=12.5)
+        self._state(
+            phase="serving", ma_status=3, extraction_status=1,
+            live_grams=12.5, flow_g_s=1.2, active_ms=5000,
+        )
         _, raw = _request(self.base, "GET", "/api/v2/mako")
-        self.assertEqual(json.loads(raw)["MA_STATUS"], 3)
-        self.assertEqual(json.loads(raw)["MA_EXTRACTION_STATUS"], 1)
+        serving = json.loads(raw)
+        self.assertEqual(serving["MA_STATUS"], 3)
+        self.assertEqual(serving["MA_EXTRACTION_STATUS"], 1)
+        self.assertEqual(serving["REAL_EXTRACTION_TIME_MS"], 5000)
+        self.assertEqual(serving["PU_SENS_FLOW_METER_VOLUME"], 12.5)
+        self.assertEqual(serving["PU_SENS_FLOW_METER_FLOWRATE"], 1.2)
 
         now = int(time.time() * 1000) % 2147483648
         self._state(
@@ -155,6 +179,7 @@ class OnDevicePhpTests(unittest.TestCase):
         self.assertEqual(value["MA_STATUS"], 4)
         self.assertEqual(value["MA_EXTRACTION_STATUS"], 2)
         self.assertEqual(value["REAL_EXTRACTION_TIME_MS"], 24600)
+        self.assertEqual(value["PU_SENS_FLOW_METER_VOLUME"], 18.0)
 
     def test_finishing_window_expires(self) -> None:
         now = int(time.time() * 1000) % 2147483648
@@ -188,6 +213,62 @@ class OnDevicePhpTests(unittest.TestCase):
         self.assertEqual(json.loads(self.start_path.read_text())["id"], "shot-1")
         status, _ = _request(self.base, "GET", "/api/v2/scripts/execute")
         self.assertEqual(status, 405)
+
+    def test_esp_ingest_drives_xenia_and_hmi_fields(self) -> None:
+        status, raw = _request(
+            self.base, "POST", "/api/v2/ingest",
+            {
+                "source": "esp32-ble",
+                "phase": "serving",
+                "live_grams": 17.4,
+                "flow_g_s": 1.3,
+                "active_ms": 4200,
+                "shot_count": 3,
+            },
+            headers={"X-Scale-Token": "test-token"},
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(raw)["ok"])
+        status, raw = _request(self.base, "GET", "/api/v2/mako")
+        value = json.loads(raw)
+        self.assertEqual(value["MA_STATUS"], 3)
+        self.assertEqual(value["MA_EXTRACTION_STATUS"], 1)
+        self.assertEqual(value["REAL_EXTRACTION_TIME_MS"], 4200)
+        self.assertEqual(value["PU_SENS_FLOW_METER_VOLUME"], 17.4)
+        self.assertEqual(value["PU_SENS_FLOW_METER_FLOWRATE"], 1.3)
+        self.assertEqual(value["script"], "SCALE")
+
+    def test_esp_ingest_requires_token_and_valid_phase(self) -> None:
+        status, _ = _request(
+            self.base, "POST", "/api/v2/ingest",
+            {"phase": "serving", "live_grams": 1.0},
+        )
+        self.assertEqual(status, 403)
+        status, _ = _request(
+            self.base, "POST", "/api/v2/ingest",
+            {"phase": "serving", "live_grams": 1.0},
+            headers={"X-Scale-Token": "wrong"},
+        )
+        self.assertEqual(status, 403)
+        status, _ = _request(
+            self.base, "POST", "/api/v2/ingest",
+            {"phase": "nope", "live_grams": 1.0},
+            headers={"X-Scale-Token": "test-token"},
+        )
+        self.assertEqual(status, 400)
+
+    def test_stale_esp_state_falls_back_to_wifi_daemon(self) -> None:
+        self._state()
+        self.esp_path.write_text(json.dumps({
+            "schema": 1, "source": "esp32-ble", "connected": True,
+            "phase": "serving", "live_grams": 99.0, "flow_g_s": 9.0,
+            "active_ms": 9, "last_shot": None, "finishing_until_ms": 0,
+            "shot_count": 9, "reconnects": 0, "error": "",
+            "updated_ms": 1,
+        }))
+        status, raw = _request(self.base, "GET", "/api/v2/mako")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(raw)["MA_STATUS"], 1)
 
     def test_webui_page_renders_state(self) -> None:
         self._state(phase="serving", live_grams=17.4, shot_count=2,

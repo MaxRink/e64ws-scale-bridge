@@ -20,6 +20,8 @@ docker run -d --rm --name "$NAME" \
     -e SCALE_BRIDGE_STATE=/state/state.json \
     -e SCALE_BRIDGE_RATIO=/state/brewratio.json \
     -e SCALE_BRIDGE_BREW_START=/state/brew-start.json \
+    -e SCALE_BRIDGE_ESP_STATE=/state/esp-state.json \
+    -e SCALE_BRIDGE_INGEST_TOKEN=test-token \
     -e SCALE_BRIDGE_NO_AUTH=1 \
     php:8.4-cli php -S 0.0.0.0:80 -t ondevice/web >/dev/null
 

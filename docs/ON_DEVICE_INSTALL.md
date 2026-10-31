@@ -65,7 +65,8 @@ Default config:
   "port": 80,
   "path": "/snapshot",
   "timeout": 10,
-  "finishing_ms": 3000
+  "finishing_ms": 3000,
+  "ingest_token": "<random token for the ESP32 gateway>"
 }
 ```
 
@@ -165,10 +166,22 @@ The vendor HMI already has an M2M/coffee-machine configuration screen. Point it
 at the grinder's own address (`127.0.0.1` or its LAN IP), select the Xenia
 machine, and enable M2M. The HMI is designed to use the PHP-served
 `/api/v2/machine` and `/api/v2/mako` documents exactly as it would use a real
-Xenia: connection state, machine status and the parsed brew/extraction fields.
-The QEMU HMI was blocked by its expected "Security data missing" modal, so the
-final screen interaction is documented from the driver contract, not yet
-observed end-to-end.
+Xenia. The existing **Xenia Diagnosis** screen then shows:
+
+| HMI label | Source |
+|---|---|
+| Com. Status / Machine Status | `MA_STATUS` / connection |
+| Output Amount (g) | `PU_SENS_FLOW_METER_VOLUME` = live grams (or last shot mass while finishing) |
+| Flow Rate (g/s) | `PU_SENS_FLOW_METER_FLOWRATE` |
+| Real Extraction Time (ms) | `REAL_EXTRACTION_TIME_MS` = live active time, then final shot time |
+| Script | `script` = `SCALE` (identifies the local bridge) |
+| Temperatures / Tank / Timestamp | static or local timestamp |
+
+Navigation: **Machine To Machine → Enable XENIA → Diagnosis**; **Configuration
+→ Edit Host** to set `127.0.0.1` or the grinder's LAN IP. No QML patch is
+needed for this view. The QEMU HMI was blocked by its expected "Security data
+missing" modal, so the final screen interaction is documented from the driver
+contract, not yet observed end-to-end.
 
 This gives a two-device setup with no HMI modification:
 
@@ -176,10 +189,26 @@ This gives a two-device setup with no HMI modification:
 scale --WiFi--> scalebridged --state--> PHP Xenia <--HTTP-- vendor HMI/GBS
 ```
 
-The HMI does **not** get a new live-weight widget. The scale's own display is
-the weight readout; the phone/laptop WebUI at `/scale/` shows live weight and
-the last shot. Whether the HMI/GBS actually applies the Xenia extraction time
-to the dial is still the physical A/B gate.
+This gives a live weight/flow/time/status view on the built-in HMI through the
+vendor's own Xenia screen. It does not add tare/start/stop buttons or a BLE
+gateway configuration screen; those stay on the scale/WebUI until a custom HMI
+is accepted. Whether the HMI/GBS actually applies the Xenia extraction time to
+the dial is still the physical A/B gate.
+
+### ESP32 BLE gateway ingest
+
+A future ESP32 BLE-central firmware can feed the same state without touching
+the STM32:
+
+```text
+BLE scale -> ESP32 (central + shot detector) --HTTP POST--> /api/v2/ingest
+                                                         -> esp-state.json
+                                                         -> /api/v2/mako -> HMI/GBS
+```
+
+The endpoint is token-protected with `ingest_token` from the config. A fresh ESP
+snapshot wins for 5 s, then the WiFi daemon resumes. Contract, firmware plan and
+resource caveats: `docs/ESP32_BLE_GATEWAY.md`.
 
 ### Why the HMI is not patched
 
@@ -222,10 +251,10 @@ image.
 Off-device:
 
 ```sh
-# daemon + existing bridge tests (47 tests, 1 skip when PHP is absent)
+# daemon + existing bridge tests (52 tests, 1 skip when PHP is absent)
 python3 -m unittest discover -s tests -v
 
-# PHP 8.4 endpoints and page, in Docker
+# PHP 8.4 endpoints/page/ESP32 ingest, in Docker
 ./tools/run_php_tests.sh
 ```
 
