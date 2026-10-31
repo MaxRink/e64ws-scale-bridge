@@ -183,9 +183,11 @@ extension.
 QEMU evidence (from-SWU image, 2026-10-31): after `install.sh`, HTTP
 `GET /api/v2/mako` returned `200` with a real shot state
 (`MA_STATUS=4`, `REAL_EXTRACTION_TIME_MS=3200`), `POST /api/v2/brewratio`
-returned the echoed pair, and `/scale/` still redirected to HTTPS. The E64
-HMI was blocked by its expected "Security data missing" modal, so an
-end-to-end client poll/GBS A/B was **not** observed yet.
+returned the echoed pair, and `/scale/` still redirected to HTTPS. A second
+install/uninstall cycle with the installed `uninstall.sh --yes --purge`
+restored the vendor `lighttpd.conf`, removed the init hook and removed
+`/db/scale-bridge`. The E64 HMI was blocked by its expected "Security data
+missing" modal, so an end-to-end client poll/GBS A/B was **not** observed yet.
 
 On a QEMU/virtual E64 (next):
 
