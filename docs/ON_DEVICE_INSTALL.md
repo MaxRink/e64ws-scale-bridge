@@ -150,6 +150,62 @@ to the internet.
 The daemon writes atomically (`state.json.tmp` + rename) and throttles live
 updates to 10 Hz. Shot history is append-only JSONL.
 
+## HMI integration
+
+There are two different UIs on the E64:
+
+| UI | What it is | What this project does |
+|---|---|---|
+| Graphical HMI | Qt/QML `NgxUiApp` + `libNgxUi.so`, 320×480, rotary/6 keys, no touch | **Not patched.** Uses the vendor M2M/coffee-machine screen. |
+| Web UI | lighttpd/PHP at `https://<grinder>/` | Adds `/scale/` (read-only live weight/last shot) and the four Xenia routes. |
+
+### Current, low-risk integration: vendor M2M screen
+
+The vendor HMI already has an M2M/coffee-machine configuration screen. Point it
+at the grinder's own address (`127.0.0.1` or its LAN IP), select the Xenia
+machine, and enable M2M. The HMI is designed to use the PHP-served
+`/api/v2/machine` and `/api/v2/mako` documents exactly as it would use a real
+Xenia: connection state, machine status and the parsed brew/extraction fields.
+The QEMU HMI was blocked by its expected "Security data missing" modal, so the
+final screen interaction is documented from the driver contract, not yet
+observed end-to-end.
+
+This gives a two-device setup with no HMI modification:
+
+```text
+scale --WiFi--> scalebridged --state--> PHP Xenia <--HTTP-- vendor HMI/GBS
+```
+
+The HMI does **not** get a new live-weight widget. The scale's own display is
+the weight readout; the phone/laptop WebUI at `/scale/` shows live weight and
+the last shot. Whether the HMI/GBS actually applies the Xenia extraction time
+to the dial is still the physical A/B gate.
+
+### Why the HMI is not patched
+
+All 167 QML/JS files are compiled into `libNgxUi.so` qrc resources. Verified
+negatives: `QML2_IMPORT_PATH` does not override them, an external
+`/usr/local/qml/Qml/NgxUi/MainItem.qml` is ignored, and
+`QT_ADDITIONAL_RESOURCE` does not exist in Qt 5.15.8. There is no filesystem
+extension point or plugin loader for an extra HMI screen.
+
+The available custom-HMI routes are ranked in
+`docs/UI_CUSTOMISATION.md` (research repo):
+
+| Option | Effort | Survives update | Risk |
+|---|---|---|---|
+| Stock M2M screen + `/scale/` WebUI | done | WebUI no | none |
+| Drop-in `qmlscene` HMI | 1–3 h | no | medium; loses vendor screens, update UI and hardware input |
+| Framebuffer overlay | ~1 day | no | medium; HMI repaints erase it, needs compositing |
+| Patch/replace `libNgxUi.so` qrc | 1–2 days | no | high; preserves vendor UI but needs qrc rebuild and recovery |
+| `LD_PRELOAD` QResource shim | 2–3 days | no | medium-high; untested |
+| Custom signed SWU | vendor key | yes | brick risk; not available |
+
+The recommended path is the stock M2M screen for control/status and the
+`/scale/` page for live weight. A native HMI widget should be a separate,
+explicitly accepted high-risk project, tested first on QEMU with a recovery
+image.
+
 ## Security
 
 - The daemon starts as root, reads the config, then drops to `www-data` before
