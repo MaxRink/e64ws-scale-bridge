@@ -122,6 +122,8 @@ class OnDevicePhpTests(unittest.TestCase):
         self.assertEqual(value["MA_STATUS"], 1)
         self.assertEqual(value["MA_EXTRACTION_STATUS"], 0)
         self.assertEqual(value["REAL_EXTRACTION_TIME_MS"], 0)
+        self.assertIsInstance(value["TIMESTAMP"], str)
+        self.assertRegex(value["TIMESTAMP"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
         for key in (
             "PU_SENS_FLOW_METER_VOLUME",
             "BG_SET_TEMP",
@@ -140,7 +142,7 @@ class OnDevicePhpTests(unittest.TestCase):
         self.assertEqual(json.loads(raw)["MA_STATUS"], 3)
         self.assertEqual(json.loads(raw)["MA_EXTRACTION_STATUS"], 1)
 
-        now = int(time.time() * 1000)
+        now = int(time.time() * 1000) % 2147483648
         self._state(
             phase="finishing",
             ma_status=4,
@@ -155,7 +157,7 @@ class OnDevicePhpTests(unittest.TestCase):
         self.assertEqual(value["REAL_EXTRACTION_TIME_MS"], 24600)
 
     def test_finishing_window_expires(self) -> None:
-        now = int(time.time() * 1000)
+        now = int(time.time() * 1000) % 2147483648
         self._state(
             phase="finishing",
             finishing_until_ms=now - 1,
@@ -167,7 +169,7 @@ class OnDevicePhpTests(unittest.TestCase):
     def test_brewratio_roundtrip_and_validation(self) -> None:
         status, raw = _request(
             self.base, "POST", "/api/v2/brewratio",
-            {"SYNC_BEVERAGE_WEIGHT": 18, "SYNC_FILTER": 1},
+            {"SYNC_BEVERAGE_WEIGHT": "18", "SYNC_FILTER": "1"},
         )
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(raw), {"SYNC_BEVERAGE_WEIGHT": 18, "SYNC_FILTER": 1})

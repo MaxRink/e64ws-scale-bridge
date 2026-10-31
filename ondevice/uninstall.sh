@@ -37,6 +37,15 @@ if [ -x "$INIT" ]; then
     rm -f "$INIT"
 fi
 
+if [ -f /db/scale-bridge/lighttpd.conf.vendor ] && [ -x /storage/scale-bridge/ondevice/patch_lighttpd.py ]; then
+    /storage/scale-bridge/ondevice/patch_lighttpd.py --restore \
+        --config /etc/lighttpd/lighttpd.conf \
+        --backup /db/scale-bridge/lighttpd.conf.vendor || true
+    if /usr/sbin/lighttpd -t -f /etc/lighttpd/lighttpd.conf >/dev/null 2>&1; then
+        /etc/init.d/S50lighttpd restart || true
+    fi
+fi
+
 if [ -e "$WEB/api/v2/.scale-bridge" ]; then
     rm -rf "$WEB/api/v2"
 else

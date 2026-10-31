@@ -19,7 +19,7 @@ OpenScale/HDS --ws /snapshot--> scalebridged (www-data)
                                     +--> /run/scale-bridge/state.json
                                     +--> /db/scale-bridge/shots.jsonl
 E64 CmXeniaDriver --HTTP :80--> lighttpd/PHP
-                                  /api/v2/mako
+                                  /api/v2/mako          (HTTP exception)
                                   /api/v2/machine
                                   /api/v2/brewratio
                                   /api/v2/scripts/execute
@@ -34,6 +34,8 @@ session. No WSS, no dev mode and no REST login are required for this path.
 
 - Rooted E64 (stock root is enough; dev mode is not required).
 - Writable rootfs/app slot, or the vendor `unlockrfs`/`unlockapp` helpers.
+  The installer needs both: the PHP page is in the app slot and the lighttpd
+  exception plus init hook are on the rootfs.
 - `/storage` and `/db` mounted (normal).
 - A WiFi scale exposing `ws://<host>/snapshot` (OpenScale / Half Decent Scale).
 - The grinder's Python 3.10 and lighttpd/PHP 8.4, both already present.
@@ -82,10 +84,28 @@ interval if GBS misses the finishing state.
 | `/usr/local/www/api/v2/` | Xenia routes | No; re-run installer |
 | `/usr/local/www/scale/` | WebUI status page | No; re-run installer |
 | `/etc/init.d/S95scalebridge` | start/stop hook | No; re-run installer |
+| `/etc/lighttpd/lighttpd.conf` | narrow `/api/v2/` HTTP exception | No; backup in `/db/scale-bridge/lighttpd.conf.vendor` |
 
 The installer refuses to overwrite an existing `/usr/local/www/api/v2` or init
 script unless it owns it (marker) or `--force` is used. It never remounts,
-edits lighttpd, patches the HMI, or touches the ESP32.
+patches the HMI, or touches the ESP32.
+
+### Why lighttpd is patched
+
+The E64 Xenia client is **HTTP-only**: `RestClient::open(host, 80)` builds
+`http://<host>/api/v2/...` and does not use TLS. The vendor lighttpd config
+redirects every HTTP request to HTTPS, so an unpatched grinder would return
+`301` and the client would never reach PHP. The installer adds one marked
+block that:
+
+- exempts only `^/api/v2/` from the HTTP->HTTPS redirect;
+- rewrites the four exact Xenia paths to their `index.php` so no directory
+  redirect is needed;
+- leaves every other HTTP path redirected to HTTPS.
+
+The vendor config is backed up first; `lighttpd -t` is run before restart, and
+the backup is restored on failure or on `uninstall.sh`. Use `--no-lighttpd`
+only if you serve Xenia from a different host/port.
 
 ## Endpoints
 
@@ -156,7 +176,16 @@ python3 -m unittest discover -s tests -v
 The daemon test uses a fake RFC 6455 scale and a real shot sequence: five idle
 samples, a rise, a stable 18 g window. It asserts state, phase, finishing,
 history and non-monotonic clock handling. The PHP tests cover all four routes,
-validation, finishing expiry and the WebUI page.
+validation, finishing expiry and the WebUI page. A separate test covers the
+lighttpd patch/restore and a PHP-source check for the E64's missing `filter`
+extension.
+
+QEMU evidence (from-SWU image, 2026-10-31): after `install.sh`, HTTP
+`GET /api/v2/mako` returned `200` with a real shot state
+(`MA_STATUS=4`, `REAL_EXTRACTION_TIME_MS=3200`), `POST /api/v2/brewratio`
+returned the echoed pair, and `/scale/` still redirected to HTTPS. The E64
+HMI was blocked by its expected "Security data missing" modal, so an
+end-to-end client poll/GBS A/B was **not** observed yet.
 
 On a QEMU/virtual E64 (next):
 
@@ -180,8 +209,11 @@ Physical (requires owner authorization):
 
 ## Limitations
 
-- **GBS consumption is unproven.** The E64 polls the Xenia shape, but whether
-  GBS applies the extraction time to the dial needs a physical A/B.
+- **GBS consumption is unproven.** The E64 polls the Xenia shape over HTTP,
+  but whether GBS applies the extraction time to the dial needs a physical A/B.
+- **No end-to-end client poll observed in QEMU.** The VM's HMI was blocked by
+  the expected "Security data missing" modal; the HTTP routes and installer
+  were verified independently.
 - **HMI untouched.** There is no touch controller and no vendor extension
   point; patching `libNgxUi.so` is high-risk and lost on update. Use the stock
   M2M screen.

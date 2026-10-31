@@ -85,14 +85,14 @@ class XeniaState:
     sync_weight_g: int = 0
     sync_filter: int = 0
     script: str = ""
-    timestamp: int = 0
+    timestamp: str = ""
     finish_pending: bool = False
     finishing_polls_remaining: int = 0
     last_shot: dict[str, Any] | None = None
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def _touch(self) -> None:
-        self.timestamp = int(time.time() * 1000)
+        self.timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
     def _phase_locked(self) -> str:
         return _phase_for(self.ma_status)

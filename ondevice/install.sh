@@ -16,12 +16,14 @@ set -eu
 
 DRY_RUN=0
 FORCE=0
+NO_LIGHTTPD=0
 for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY_RUN=1 ;;
         --force) FORCE=1 ;;
+        --no-lighttpd) NO_LIGHTTPD=1 ;;
         -h|--help)
-            echo "usage: $0 [--dry-run] [--force]"
+            echo "usage: $0 [--dry-run] [--force] [--no-lighttpd]"
             exit 0
             ;;
         *) echo "unknown argument: $arg" >&2; exit 2 ;;
@@ -83,6 +85,7 @@ fi
 say "Installing code to $DEST"
 run install -d "$DEST/ondevice" "$DEST/tools"
 run install -m 0755 "$ROOT/ondevice/scalebridged.py" "$DEST/ondevice/scalebridged.py"
+run install -m 0755 "$ROOT/ondevice/patch_lighttpd.py" "$DEST/ondevice/patch_lighttpd.py"
 for file in scale_bridge.py openscale_client.py e64ws_protocol.py __init__.py; do
     if [ -f "$ROOT/tools/$file" ]; then
         run install -m 0644 "$ROOT/tools/$file" "$DEST/tools/$file"
@@ -130,6 +133,25 @@ if [ "$DRY_RUN" = 0 ]; then
     cp -R "$ROOT/ondevice/web/scale/." "$WEB/scale/"
     chown -R root:root "$WEB/scale"
     chmod -R a+rX "$WEB/scale"
+fi
+
+if [ "$NO_LIGHTTPD" = 1 ]; then
+    say "Skipping lighttpd patch; the HTTP-only E64 Xenia client will not reach /api/v2/"
+else
+    say "Patching lighttpd for the HTTP-only Xenia routes"
+    run python3 "$ROOT/ondevice/patch_lighttpd.py" \
+        --config /etc/lighttpd/lighttpd.conf \
+        --backup "$DB/lighttpd.conf.vendor"
+    if [ "$DRY_RUN" = 0 ]; then
+        if ! /usr/sbin/lighttpd -t -f /etc/lighttpd/lighttpd.conf; then
+            say "error: patched lighttpd config is invalid; restoring vendor config" >&2
+            python3 "$ROOT/ondevice/patch_lighttpd.py" --restore \
+                --config /etc/lighttpd/lighttpd.conf \
+                --backup "$DB/lighttpd.conf.vendor" || true
+            exit 1
+        fi
+        /etc/init.d/S50lighttpd restart
+    fi
 fi
 
 say "Installing init script $INIT"

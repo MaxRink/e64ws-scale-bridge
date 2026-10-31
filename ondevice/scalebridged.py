@@ -42,7 +42,9 @@ SCHEMA = 1
 
 
 def now_ms() -> int:
-    return int(time.time() * 1000)
+    # The E64 PHP is 32-bit; keep cross-process timestamps inside a positive
+    # 32-bit range so comparisons still work there (wraps every ~24.8 days).
+    return int(time.time() * 1000) & 0x7FFFFFFF
 
 
 def atomic_json(path: Path, value: dict[str, Any]) -> None:

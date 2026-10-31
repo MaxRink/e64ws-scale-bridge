@@ -93,8 +93,10 @@ vi /db/scale-bridge/config.json
 ```
 
 This path is rooted-stock, not stock no-root, and it does **not** add BLE to
-the E64. GBS consumption of the Xenia extraction time is still the physical
-A/B gate. See [docs/ON_DEVICE_INSTALL.md](docs/ON_DEVICE_INSTALL.md) and the
+the E64. The installer adds a narrow lighttpd exception for `/api/v2/` because
+the E64 Xenia client is HTTP-only while the vendor web server redirects HTTP to
+HTTPS. GBS consumption of the Xenia extraction time is still the physical A/B
+gate. See [docs/ON_DEVICE_INSTALL.md](docs/ON_DEVICE_INSTALL.md) and the
 feasibility report [ON_DEVICE_SCALE_BRIDGE.md](https://github.com/MaxRink/mahlkoenig-e64ws-local-research/blob/main/docs/ON_DEVICE_SCALE_BRIDGE.md).
 
 The companion Decaid plugin (read-only grinder telemetry) is
@@ -108,9 +110,10 @@ the assisted dial-in plugin is
 python3 -m unittest discover -s tests -v
 ```
 
-47 Python tests cover the Decent/generic parsers, shot detection, event units,
-the Xenia emulator routes and the on-device daemon. Seven PHP 8.4 tests cover
-the on-device Xenia endpoints and WebUI page (`./tools/run_php_tests.sh`). The
+51 Python tests cover the Decent/generic parsers, shot detection, event units,
+the Xenia emulator routes, the on-device daemon and the lighttpd patch. Seven
+PHP 8.4 tests cover the on-device Xenia endpoints and WebUI page
+(`./tools/run_php_tests.sh`). The
 bridge was also exercised against the QEMU E64: an
 18 g / 24.6 s replay produced `brewTimeMs=24600`, `brewWeightMg=18000`,
 `validity=true`, and `AddBrewEvent` returned `{"success": true}` in development

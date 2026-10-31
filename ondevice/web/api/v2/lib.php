@@ -32,7 +32,14 @@ function scale_bridge_ratio_path(): string
 
 function scale_bridge_now_ms(): int
 {
-    return (int) floor(microtime(true) * 1000);
+    // 32-bit PHP (the E64) cannot hold a millisecond epoch. Use a positive
+    // 32-bit window; the daemon writes the same window. Wraps every ~24.8 d.
+    return (int) fmod(microtime(true) * 1000.0, 2147483648.0);
+}
+
+function scale_bridge_timestamp(): string
+{
+    return date('Y-m-d H:i:s');
 }
 
 function scale_bridge_read_json(string $path, array $default = []): array
@@ -122,7 +129,7 @@ function scale_bridge_mako(array $state, array $ratio): array
         'BG_SENS_TEMP' => 92,
         'TANK_LEVEL' => 1,
         'script' => '',
-        'TIMESTAMP' => $now,
+        'TIMESTAMP' => scale_bridge_timestamp(),
         'MA_SYNC_BEVERAGE_WEIGHT' => (int) ($ratio['SYNC_BEVERAGE_WEIGHT'] ?? 0),
         'MA_SYNC_FILTER' => (int) ($ratio['SYNC_FILTER'] ?? 0),
     ];
@@ -138,7 +145,7 @@ function scale_bridge_machine(): array
         'FW_VERSION_MINOR' => 87,
         'ESP_FW_MAJOR' => 3,
         'ESP_FW_MINOR' => 87,
-        'TIMESTAMP' => scale_bridge_now_ms(),
+        'TIMESTAMP' => scale_bridge_timestamp(),
     ];
 }
 
@@ -149,6 +156,18 @@ function scale_bridge_send_json(int $status, array $value): void
     header('Cache-Control: no-store');
     echo json_encode($value, JSON_UNESCAPED_SLASHES);
     exit;
+}
+
+function scale_bridge_int(mixed $value): ?int
+{
+    // The E64 PHP build has no filter extension; validate without filter_var().
+    if (is_int($value)) {
+        return $value;
+    }
+    if (is_string($value) && preg_match('/^-?\d+$/', $value) === 1) {
+        return (int) $value;
+    }
+    return null;
 }
 
 function scale_bridge_method(): string

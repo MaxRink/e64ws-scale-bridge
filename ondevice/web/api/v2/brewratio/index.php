@@ -6,9 +6,9 @@ if (scale_bridge_method() !== 'POST') {
     scale_bridge_send_json(405, ['error' => 'method not allowed']);
 }
 $body = scale_bridge_request_json();
-$weight = filter_var($body['SYNC_BEVERAGE_WEIGHT'] ?? 0, FILTER_VALIDATE_INT);
-$filter = filter_var($body['SYNC_FILTER'] ?? 0, FILTER_VALIDATE_INT);
-if ($weight === false || $filter === false || $weight < 0 || $weight > 100000 || $filter < 0 || $filter > 100) {
+$weight = scale_bridge_int($body['SYNC_BEVERAGE_WEIGHT'] ?? 0);
+$filter = scale_bridge_int($body['SYNC_FILTER'] ?? 0);
+if ($weight === null || $filter === null || $weight < 0 || $weight > 100000 || $filter < 0 || $filter > 100) {
     scale_bridge_send_json(400, ['error' => 'SYNC_BEVERAGE_WEIGHT/SYNC_FILTER out of range']);
 }
 $value = ['SYNC_BEVERAGE_WEIGHT' => (int) $weight, 'SYNC_FILTER' => (int) $filter];
