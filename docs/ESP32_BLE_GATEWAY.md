@@ -81,7 +81,7 @@ The four Xenia routes are unchanged; the HMI sees the ESP state through
 ## Implemented in dev
 
 - `build.sh gateway` builds the BLE-central gateway image
-  (`build/fwgateway/build/Ng2EspApp.bin`, 1,234,160 bytes; ~20.6 KB IRAM free).
+  (`build/fwgateway/build/Ng2EspApp.bin`, 1,234,192 bytes; ~20.6 KB IRAM free).
 - `src/main/ScaleGateway.{h,cpp}` is a dependency-free parser, shot detector
   and state serializer. `tests/run_scale_gateway_test.sh` compiles and runs its
   host tests.
@@ -89,6 +89,11 @@ The four Xenia routes are unchanged; the HMI sees the ESP state through
   It is compiled and linked; no BLE/radio test has been run.
 - `tools/esp32_gateway_sim.py` simulates the ESP32 HTTP side against the E64
   `/api/v2/ingest` endpoint.
+- `tests/run_host_gateway_test.sh` drives the **production**
+  `BleScaleGateway` through a virtual scale at the raw NimBLE C boundary:
+  advertisement → connect → service/characteristic/CCCD → notifications →
+  HTTP ingest, plus connect failure, missing characteristic, missing CCCD,
+  withheld notification, malformed frame and link-drop re-scan.
 
 Build and host-test:
 
@@ -98,6 +103,22 @@ ROOT=$PWD ./build.sh gateway
 ./tests/run_scale_gateway_test.sh
 # from the research repo root: python3 tools/esp_ble_client.py --help
 ```
+
+Host BLE harness:
+
+```sh
+cd tools/rebuild/esp-app/recon
+./tests/run_host_gateway_test.sh
+```
+
+This adapts the Furble simulator pattern (`sim/BleSim.cpp` +
+`lib/testing/nimble/MockNimBLE`) to our raw-C NimBLE gateway: Furble drives
+production camera objects over C++ `MockNimBLE`; our harness drives the
+production gateway over the same virtual-peer/fault model at the C API
+boundary. It found a real CCCD-completion bug: NimBLE reports descriptor
+discovery completion with a null descriptor after the CCCD write, which the
+gateway had treated as “CCCD missing” and disconnected. The production state
+machine now tracks `m_cccdWritten`.
 
 Dev ingest simulation (after installing the bridge on the E64):
 
