@@ -258,7 +258,7 @@ image.
 Off-device:
 
 ```sh
-# daemon + existing bridge tests (52 tests, 1 skip when PHP is absent)
+# daemon + existing bridge tests (55 tests, 1 skip when PHP is absent)
 python3 -m unittest discover -s tests -v
 
 # PHP 8.4 endpoints/page/ESP32 ingest, in Docker
