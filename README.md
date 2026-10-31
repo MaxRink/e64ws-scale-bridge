@@ -77,6 +77,11 @@ official scale is Wi-Fi/cloud and serial-bound.
 See [docs/STOCK_OPTIONS.md](docs/STOCK_OPTIONS.md) and
 [docs/GUIDE.md](docs/GUIDE.md).
 
+The companion Decaid plugin (read-only grinder telemetry) is
+[MaxRink/decaid-e64ws-plugin](https://github.com/MaxRink/decaid-e64ws-plugin);
+the assisted dial-in plugin is
+[MaxRink/decaid-assisted-dialin-plugin](https://github.com/MaxRink/decaid-assisted-dialin-plugin).
+
 ## Tests
 
 ```sh
