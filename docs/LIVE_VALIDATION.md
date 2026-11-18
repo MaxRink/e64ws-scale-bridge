@@ -18,7 +18,7 @@ stock `custom` unit.
 | No development tree | `/dev/testSystem.php` → 404; UI reports `(custom)` |
 | `POST /rest_api/login` `Owner`/empty | HTTP 400 `Wrong password!` |
 | `login.php` | auto-creates an Owner session, but sends the literal `Authorization: Bearer $sessionToken` |
-| Authenticated reads | a normal token minted through the documented login-construction test served `RequestDriverState`, `RequestDriverConfig` and `RequestNachineInfo`; `RequestLogMessages`/`AdcConfig`/`ConfigManagerSettings` closed `1001` |
+| Authenticated reads | a normal token minted through the documented FW-01 login-construction test served `RequestDriverState`, `RequestDriverConfig` and `RequestNachineInfo`; `RequestLogMessages`/`AdcConfig`/`ConfigManagerSettings` closed `1001` |
 | Bridge client | `tools/e64ws_client.py --token … --request RequestDriverState` returned `RequestDriverStateResult` with `refId=1`, `ddValueDum=854` |
 | Physical write path | development gate closed; `AddBrewEvent` not sent |
 
@@ -46,7 +46,7 @@ stock web UI does not hand one to the browser. No password was guessed and no
 password was set.
 
 For the read-only state capture, a normal token was minted through the
-documented login-construction test (SELECT-only; no database row written). That
+documented FW-01 login-construction test (SELECT-only; no database row written). That
 is **not** the bridge's normal login path: `--login-role Owner` still fails on a
 no-password unit, so use `--token` with an owner-supplied token.
 
