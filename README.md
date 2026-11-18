@@ -124,7 +124,7 @@ the assisted dial-in plugin is
 python3 -m unittest discover -s tests -v
 ```
 
-58 Python tests cover the Decent/generic parsers, shot detection, event units,
+61 Python tests cover the Decent/generic parsers, shot detection, event units,
 the Xenia emulator routes, the on-device daemon and the lighttpd patch. Eleven
 PHP 8.4 tests cover the on-device Xenia endpoints, WebUI page, ESP32 ingest and
 state freshness (`./tools/run_php_tests.sh`). The

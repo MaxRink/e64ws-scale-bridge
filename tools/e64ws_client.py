@@ -202,7 +202,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--token", help="existing local WSS bearer token; never printed")
     parser.add_argument("--token-file", help="read the bearer token from a 0600 file")
     parser.add_argument("--login-role", help="login locally and obtain a new token")
-    parser.add_argument("--password", help="avoid this on shell history; prefer the prompt")
+    parser.add_argument("--password", help="avoid this on shell history; prefer the prompt or --password-file")
+    parser.add_argument("--password-file", help="read the login password from a 0600 file")
+    parser.add_argument("--allow-no-password", action="store_true",
+                        help="use the documented FW-01 SELECT-only workaround if no password is supplied")
     parser.add_argument("--insecure", action="store_true", help="accept the image's self-signed certificate")
     parser.add_argument("--ca-file", help="CA/certificate file to trust instead of disabling verification")
     parser.add_argument("--timeout", type=float, default=10.0)
@@ -239,8 +242,21 @@ def main(argv: list[str] | None = None) -> int:
     if not token:
         if not args.login_role:
             parser.error("provide --token, --token-file or --login-role")
-        password = args.password if args.password is not None else getpass.getpass("local grinder password: ")
-        token = login(args.host, args.login_role, password, insecure=args.insecure, ca_file=args.ca_file)
+        if args.password is not None:
+            password = args.password
+        elif args.password_file:
+            password = Path(args.password_file).read_text().strip()
+        elif args.allow_no_password:
+            print("warning: using the FW-01 SELECT-only no-password workaround; "
+                  "use only on an owner-controlled device", file=sys.stderr)
+            token = login_no_password(args.host, insecure=args.insecure,
+                                      ca_file=args.ca_file)
+            password = None
+        else:
+            password = getpass.getpass("local grinder password: ")
+        if not token:
+            token = login(args.host, args.login_role, password,
+                          insecure=args.insecure, ca_file=args.ca_file)
 
     protocol = E64WSProtocol()
     if args.request:

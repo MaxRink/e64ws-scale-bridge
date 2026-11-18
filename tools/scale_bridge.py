@@ -68,10 +68,10 @@ def _e64_client():
     """
 
     try:
-        from tools.e64ws_client import login, run_request
+        from tools.e64ws_client import login, login_no_password, run_request
     except ModuleNotFoundError:  # pragma: no cover - direct script execution
-        from e64ws_client import login, run_request
-    return login, run_request
+        from e64ws_client import login, login_no_password, run_request
+    return login, login_no_password, run_request
 
 DECENT_SERVICE = "0000fff0-0000-1000-8000-00805f9b34fb"
 DECENT_NOTIFY = "0000fff4-0000-1000-8000-00805f9b34fb"
@@ -438,7 +438,7 @@ def send_add_brew_event(
 ) -> dict[str, Any]:
     protocol = E64WSProtocol()
     message = protocol.action("AddBrewEvent", dict(event))
-    _, run_request = _e64_client()
+    _, _, run_request = _e64_client()
     return run_request(
         host,
         token,
