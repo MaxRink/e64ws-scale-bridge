@@ -467,8 +467,17 @@ def _samples_for(args: argparse.Namespace) -> Iterable[ScaleSample]:
 def _token_for(args: argparse.Namespace) -> str:
     if args.token:
         return args.token
+    if args.token_file:
+        path = Path(args.token_file)
+        mode = path.stat().st_mode & 0o777
+        if mode & 0o077:
+            print(f"warning: {path} is mode {mode:o}; prefer 600", file=sys.stderr)
+        token = path.read_text().strip()
+        if not token:
+            raise ValueError("token file is empty")
+        return token
     if not args.login_role:
-        raise ValueError("provide --token or --login-role")
+        raise ValueError("provide --token, --token-file or --login-role")
     password = args.password
     if password is None:
         password = getpass.getpass("local grinder password: ")
@@ -560,6 +569,7 @@ def build_parser() -> argparse.ArgumentParser:
     grinder = parser.add_argument_group("grinder (only with --apply)")
     grinder.add_argument("--grinder", help="E64 host[:port] for the local WSS/HTTPS API")
     grinder.add_argument("--token", help="existing local WSS token; never printed")
+    grinder.add_argument("--token-file", help="read the WSS token from a 0600 file")
     grinder.add_argument("--login-role", help="login locally to obtain a token")
     grinder.add_argument("--password", help="avoid on the command line; prefer the prompt")
     grinder.add_argument("--insecure", action="store_true")

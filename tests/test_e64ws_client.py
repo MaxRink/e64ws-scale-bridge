@@ -1,9 +1,13 @@
 """Tests for the local E64 WSS client's login diagnostics."""
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
+from types import SimpleNamespace
 
 from tools.e64ws_client import login_error_message
+from tools.scale_bridge import _token_for
 
 
 class LoginErrorMessageTests(unittest.TestCase):
@@ -21,6 +25,20 @@ class LoginErrorMessageTests(unittest.TestCase):
     def test_other_400_does_not_get_the_hint(self) -> None:
         message = login_error_message(400, "Missing parameter!")
         self.assertNotIn("Role.Owner.LoginData", message)
+
+    def test_token_file_is_read_and_mode_is_checked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "token")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("abcd\n")
+            os.chmod(path, 0o600)
+            args = SimpleNamespace(token=None, token_file=path, login_role=None)
+            self.assertEqual(_token_for(args), "abcd")
+
+    def test_missing_token_file_without_login_is_rejected(self) -> None:
+        args = SimpleNamespace(token=None, token_file=None, login_role=None)
+        with self.assertRaises(ValueError):
+            _token_for(args)
 
 
 if __name__ == "__main__":

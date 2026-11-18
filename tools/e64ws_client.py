@@ -17,6 +17,7 @@ import ssl
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 from http.cookiejar import CookieJar
 from typing import Any
 
@@ -157,6 +158,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", required=True, help="local grinder hostname or IP, without a scheme")
     parser.add_argument("--token", help="existing local WSS bearer token; never printed")
+    parser.add_argument("--token-file", help="read the bearer token from a 0600 file")
     parser.add_argument("--login-role", help="login locally and obtain a new token")
     parser.add_argument("--password", help="avoid this on shell history; prefer the prompt")
     parser.add_argument("--insecure", action="store_true", help="accept the image's self-signed certificate")
@@ -184,9 +186,17 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("direct maintenance command is guarded; add --allow-hazardous only on an isolated owner-controlled test machine")
 
     token = args.token
+    if not token and args.token_file:
+        path = Path(args.token_file)
+        mode = path.stat().st_mode & 0o777
+        if mode & 0o077:
+            print(f"warning: {path} is mode {mode:o}; prefer 600", file=sys.stderr)
+        token = path.read_text().strip()
+        if not token:
+            parser.error("token file is empty")
     if not token:
         if not args.login_role:
-            parser.error("provide --token or --login-role")
+            parser.error("provide --token, --token-file or --login-role")
         password = args.password if args.password is not None else getpass.getpass("local grinder password: ")
         token = login(args.host, args.login_role, password, insecure=args.insecure, ca_file=args.ca_file)
 
