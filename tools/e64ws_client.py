@@ -46,6 +46,18 @@ def _https_context(*, insecure: bool, ca_file: str | None) -> ssl.SSLContext:
     return ssl.create_default_context(cafile=ca_file)
 
 
+def login_error_message(status: int, detail: str) -> str:
+    """Explain the HSG no-password Owner split when a login fails."""
+    message = f"login failed with HTTP {status}: {detail}"
+    if status == 400 and "Wrong password!" in detail:
+        message += (
+            "\nHSG note: an empty Owner password is rejected by /rest_api/login"
+            " when Role.Owner.LoginData exists but is empty. Set an Owner"
+            " password or pass --token instead."
+        )
+    return message
+
+
 def login(host: str, role: str, password: str, *, insecure: bool, ca_file: str | None) -> str:
     body = json.dumps({"userRole": role, "password": password}).encode()
     request = urllib.request.Request(
@@ -74,7 +86,7 @@ def login(host: str, role: str, password: str, *, insecure: bool, ca_file: str |
             return authorization.removeprefix("Bearer ").strip()
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode(errors="replace")
-        raise RuntimeError(f"login failed with HTTP {exc.code}: {detail}") from exc
+        raise RuntimeError(login_error_message(exc.code, detail)) from exc
 
 
 def run_request(
