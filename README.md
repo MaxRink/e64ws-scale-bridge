@@ -8,7 +8,10 @@ BLE Weight Scale service, and deterministic JSONL replay.
 > **Status.** Software-verified against the from-SWU QEMU grinder. The
 > `AddBrewEvent` path is development-gated on the vendor image; stock-firmware
 > options are manual brew time, a local Xenia emulator, or an owner-account
-> cloud event. No physical grinder was used for this repository.
+> cloud event. A physical E64 WS was reached read-only on 2026-11-18, but
+> `AddBrewEvent` was **not** sent: the unit is a `custom` build with no
+> development tree, and no WSS token could be minted. See
+> [docs/LIVE_VALIDATION.md](docs/LIVE_VALIDATION.md).
 
 ## Quick start
 
@@ -24,9 +27,10 @@ python3 tools/scale_bridge.py --openscale hds.local --once
 # Decent / Half Decent BLE, or a generic 0x181D scale
 python3 tools/scale_bridge.py --ble AA:BB:CC:DD:EE:FF --ble-kind auto --once
 
-# Send to a dev-unlocked E64 (stock refuses AddBrewEvent)
+# Send to a dev-unlocked E64 (stock refuses AddBrewEvent).
+# The token path is the reliable one on a unit whose Owner row is empty.
 python3 tools/scale_bridge.py --openscale hds.local \
-  --grinder 192.168.1.50 --login-role Owner --apply --yes
+  --grinder 192.168.1.50 --token "$E64_TOKEN" --apply --yes
 ```
 
 `--apply` changes the grinder and requires `--yes`. The bridge prints the event
@@ -116,7 +120,7 @@ the assisted dial-in plugin is
 python3 -m unittest discover -s tests -v
 ```
 
-55 Python tests cover the Decent/generic parsers, shot detection, event units,
+58 Python tests cover the Decent/generic parsers, shot detection, event units,
 the Xenia emulator routes, the on-device daemon and the lighttpd patch. Eleven
 PHP 8.4 tests cover the on-device Xenia endpoints, WebUI page, ESP32 ingest and
 state freshness (`./tools/run_php_tests.sh`). The
@@ -128,7 +132,8 @@ mode.
 ## Scope and limitations
 
 - No cloud access, vendor keys or credentials are included.
-- No physical hardware validation; BLE needs a real scale.
+- No physical write-path validation; BLE needs a real scale. The 2026-11-18
+  physical check was transport/login-gate only.
 - Stock grinder control is gated; see the stock options.
 - The Xenia emulator is a protocol fixture, not a coffee-machine replacement.
 
