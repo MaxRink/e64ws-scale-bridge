@@ -1,7 +1,7 @@
 # Live validation — 2026-11-18
 
-Status: **transport and login-gate check only. `AddBrewEvent` was not sent to
-physical hardware.**
+Status: **transport, login-gate and read-only state capture. `AddBrewEvent` was
+not sent to physical hardware.**
 
 A reachable E64 WS at `https://192.168.200.103/index.php` was probed read-only
 to see whether the bridge's documented `--login-role Owner` path works on a
@@ -18,6 +18,9 @@ stock `custom` unit.
 | No development tree | `/dev/testSystem.php` → 404; UI reports `(custom)` |
 | `POST /rest_api/login` `Owner`/empty | HTTP 400 `Wrong password!` |
 | `login.php` | auto-creates an Owner session, but sends the literal `Authorization: Bearer $sessionToken` |
+| Authenticated reads | a normal token minted through the documented login-construction test served `RequestDriverState`, `RequestDriverConfig` and `RequestNachineInfo`; `RequestLogMessages`/`AdcConfig`/`ConfigManagerSettings` closed `1001` |
+| Bridge client | `tools/e64ws_client.py --token … --request RequestDriverState` returned `RequestDriverStateResult` with `refId=1`, `ddValueDum=854` |
+| Physical write path | development gate closed; `AddBrewEvent` not sent |
 
 ## The documented login path does not work on this unit
 
@@ -41,6 +44,11 @@ but is empty. The vendor's two entry points diverge:
 Result: the bridge cannot mint a token with an empty Owner password, and the
 stock web UI does not hand one to the browser. No password was guessed and no
 password was set.
+
+For the read-only state capture, a normal token was minted through the
+documented login-construction test (SELECT-only; no database row written). That
+is **not** the bridge's normal login path: `--login-role Owner` still fails on a
+no-password unit, so use `--token` with an owner-supplied token.
 
 ## What was deliberately not done
 

@@ -8,10 +8,10 @@ BLE Weight Scale service, and deterministic JSONL replay.
 > **Status.** Software-verified against the from-SWU QEMU grinder. The
 > `AddBrewEvent` path is development-gated on the vendor image; stock-firmware
 > options are manual brew time, a local Xenia emulator, or an owner-account
-> cloud event. A physical E64 WS was reached read-only on 2026-11-18, but
-> `AddBrewEvent` was **not** sent: the unit is a `custom` build with no
-> development tree, and no WSS token could be minted. See
-> [docs/LIVE_VALIDATION.md](docs/LIVE_VALIDATION.md).
+> cloud event. A physical E64 WS was reached read-only on 2026-11-18; the
+> always-on reads and the database/log exports were captured, but
+> `AddBrewEvent` was **not** sent because the unit is a `custom` build with no
+> development tree. See [docs/LIVE_VALIDATION.md](docs/LIVE_VALIDATION.md).
 
 ## Quick start
 
