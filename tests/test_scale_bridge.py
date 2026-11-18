@@ -5,6 +5,8 @@ from tools.scale_bridge import (
     ShotDetector,
     ScaleSample,
     build_add_brew_event,
+    build_parser,
+    main,
     parse_ble_weight,
     parse_decent_weight,
     parse_gatt_weight,
@@ -141,6 +143,26 @@ class EventTests(unittest.TestCase):
         shot = Shot(0, 0, 0, 0, 0, 0, 0, False, "none")
         with self.assertRaises(ValueError):
             build_add_brew_event(shot)
+
+
+class CliPreflightTests(unittest.TestCase):
+    def test_preflight_accepts_password_file(self) -> None:
+        args = build_parser().parse_args([
+            "--replay", "shot.jsonl", "--grinder", "192.0.2.1",
+            "--preflight", "--allow-no-password", "--password-file", "/tmp/pw",
+        ])
+        self.assertTrue(args.preflight)
+        self.assertTrue(args.allow_no_password)
+        self.assertEqual(args.password_file, "/tmp/pw")
+
+    def test_preflight_requires_grinder(self) -> None:
+        with self.assertRaises(SystemExit):
+            main(["--replay", "shot.jsonl", "--preflight"])
+
+    def test_preflight_rejects_apply(self) -> None:
+        with self.assertRaises(SystemExit):
+            main(["--replay", "shot.jsonl", "--grinder", "192.0.2.1",
+                  "--preflight", "--apply", "--yes"])
 
 
 if __name__ == "__main__":

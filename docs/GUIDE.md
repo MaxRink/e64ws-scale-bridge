@@ -66,6 +66,16 @@ python3 tools/scale_bridge.py --openscale hds.local \
 If you have a token already, pass `--token` and `--wss-port 9997`. Do not put a
 token in shell history. The event is printed before it is sent.
 
+Read-only preflight before a write path:
+
+```sh
+python3 tools/scale_bridge.py --grinder 192.168.1.50 \
+  --login-role Owner --password-file /tmp/e64-owner.pass --insecure --preflight
+```
+
+`--preflight` logs in, sends one `RequestDriverState`, prints the DD/NTC/fan
+summary and exits. It never sends `AddBrewEvent`.
+
 ![Machine-to-machine screen](assets/machine-to-machine.png)
 
 The grinder's Machine-to-Machine screen is where a local Xenia host is entered

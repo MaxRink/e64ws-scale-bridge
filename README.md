@@ -40,6 +40,13 @@ python3 tools/scale_bridge.py --openscale hds.local \
 unit with no Owner password. `--apply` changes the grinder and requires `--yes`.
 The bridge prints the event by default. Tokens and passwords are never printed.
 
+Read-only preflight (no scale source and no `AddBrewEvent`):
+
+```sh
+python3 tools/scale_bridge.py --grinder 192.168.1.50 \
+  --login-role Owner --password-file /tmp/e64-owner.pass --insecure --preflight
+```
+
 ## What it does
 
 ```text

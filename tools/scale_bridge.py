@@ -500,6 +500,28 @@ def _token_for(args: argparse.Namespace) -> str:
 
 
 def _run(args: argparse.Namespace) -> int:
+    if args.preflight:
+        token = _token_for(args)
+        _, _, run_request = _e64_client()
+        response = run_request(
+            args.grinder,
+            token,
+            {"type": "RequestDriverState", "msgId": 1, "data": {}},
+            insecure=args.insecure,
+            ca_file=args.ca_file,
+            timeout=args.timeout,
+            wss_port=args.wss_port,
+        )
+        data = response.get("data", {}) if isinstance(response, dict) else {}
+        print(json.dumps({
+            "type": response.get("type") if isinstance(response, dict) else None,
+            "ddValueDum": data.get("ddValueDum"),
+            "ddSensorFailed": data.get("ddSensorFailed"),
+            "grindState": data.get("grindState"),
+            "ntc1TempDegC": data.get("ntc1TempDegC"),
+            "fan1TachoRpm": data.get("fan1TachoRpm"),
+        }, indent=2, sort_keys=True))
+        return 0
     if args.apply and not args.yes:
         raise ValueError("--apply changes the grinder; add --yes after reviewing a dry run")
     detector = ShotDetector(
@@ -589,6 +611,8 @@ def build_parser() -> argparse.ArgumentParser:
     grinder.add_argument("--machine-name", default="scale-bridge")
     grinder.add_argument("--group-head", default="0")
     grinder.add_argument("--wss-port", type=int, default=9997)
+    grinder.add_argument("--preflight", action="store_true",
+                         help="log in and read RequestDriverState, then exit; no AddBrewEvent")
     grinder.add_argument("--apply", action="store_true", help="send AddBrewEvent to the grinder")
     grinder.add_argument("--yes", action="store_true", help="confirm --apply")
     parser.add_argument("--json", action="store_true")
@@ -600,7 +624,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.apply and not args.grinder:
         parser.error("--apply requires --grinder")
-    if bool(args.replay) + bool(args.openscale) + bool(args.ble) != 1:
+    if args.preflight and not args.grinder:
+        parser.error("--preflight requires --grinder")
+    if args.preflight and args.apply:
+        parser.error("--preflight cannot be combined with --apply")
+    if not args.preflight and bool(args.replay) + bool(args.openscale) + bool(args.ble) != 1:
         parser.error("choose exactly one of --replay, --openscale or --ble")
     try:
         return _run(args)
