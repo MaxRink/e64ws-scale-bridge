@@ -133,7 +133,7 @@ mode.
 
 - No cloud access, vendor keys or credentials are included.
 - No physical write-path validation; BLE needs a real scale. The 2026-11-18
-  physical check was transport/login-gate only.
+  physical check was transport/login-gate plus a read-only state capture.
 - Stock grinder control is gated; see the stock options.
 - The Xenia emulator is a protocol fixture, not a coffee-machine replacement.
 
