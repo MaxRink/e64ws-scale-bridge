@@ -46,12 +46,20 @@ python3 tools/scale_bridge.py --ble <address> --ble-kind generic --once
 
 ## 3. Connect the E64
 
-The bridge needs a local WSS token. On a development-mode grinder:
+The bridge needs a local WSS token. On a development-mode grinder with an Owner
+password set:
 
 ```sh
 python3 tools/scale_bridge.py --openscale hds.local \
   --grinder 192.168.1.50 --login-role Owner --insecure --apply --yes
 ```
+
+> **No-password Owner units.** On the 2026-11-18 `custom` unit, `login.php`
+> auto-creates an Owner session, but `POST /rest_api/login` rejects an empty
+> Owner password and the UI's bearer header is the literal `$sessionToken`.
+> `--login-role Owner` therefore fails with `Wrong password!`. Set an Owner
+> password first or pass a short-lived `--token` instead. See
+> [LIVE_VALIDATION.md](LIVE_VALIDATION.md).
 
 If you have a token already, pass `--token` and `--wss-port 9997`. Do not put a
 token in shell history. The event is printed before it is sent.
