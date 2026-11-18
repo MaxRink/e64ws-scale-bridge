@@ -28,13 +28,17 @@ python3 tools/scale_bridge.py --openscale hds.local --once
 python3 tools/scale_bridge.py --ble AA:BB:CC:DD:EE:FF --ble-kind auto --once
 
 # Send to a dev-unlocked E64 (stock refuses AddBrewEvent).
-# The token path is the reliable one on a unit whose Owner row is empty.
+# Use a token file, or log in with the current Owner password.
 python3 tools/scale_bridge.py --openscale hds.local \
-  --grinder 192.168.1.50 --token "$E64_TOKEN" --apply --yes
+  --grinder 192.168.1.50 --token-file /tmp/e64.token --apply --yes
+python3 tools/scale_bridge.py --openscale hds.local \
+  --grinder 192.168.1.50 --login-role Owner \
+  --password-file /tmp/e64-owner.pass --apply --yes
 ```
 
-`--apply` changes the grinder and requires `--yes`. The bridge prints the event
-by default. Tokens are never printed.
+`--allow-no-password` is the explicit FW-01 workaround for an owner-controlled
+unit with no Owner password. `--apply` changes the grinder and requires `--yes`.
+The bridge prints the event by default. Tokens and passwords are never printed.
 
 ## What it does
 

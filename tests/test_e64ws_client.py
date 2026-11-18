@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
-from tools.e64ws_client import login_error_message
+from tools.e64ws_client import _vendor_hash, login_error_message, no_password_payload
 from tools.scale_bridge import _token_for
 
 
@@ -39,6 +39,14 @@ class LoginErrorMessageTests(unittest.TestCase):
         args = SimpleNamespace(token=None, token_file=None, login_role=None)
         with self.assertRaises(ValueError):
             _token_for(args)
+
+    def test_no_password_payload_is_select_only_and_verifiable(self) -> None:
+        role, password, encoded = no_password_payload()
+        self.assertTrue(role.startswith('x" UNION SELECT "1$1000$'))
+        self.assertTrue(role.endswith('" -- '))
+        self.assertNotIn("'", role)
+        _, rounds, salt, expected = encoded.split("$", 3)
+        self.assertEqual(_vendor_hash(password, salt, int(rounds)), expected)
 
 
 if __name__ == "__main__":

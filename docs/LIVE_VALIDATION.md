@@ -77,3 +77,16 @@ boundary for the write path.
 The full read-only report is in the research repository:
 `mahlkoenig-e64ws-local-research/docs/LIVE_VALIDATION_2026-11-18.md`. No token,
 password, session cookie, serial number or MAC address is included there.
+
+## Clean-token addendum (Owner password set)
+
+The owner later set an Owner password. A normal
+`e64ws_client.py --login-role Owner --password-file /tmp/e64-owner.pass
+--request RequestDriverState` then returned `RequestDriverStateResult` with
+`refId=1` and `ddValueDum=817`; no FW-01 workaround was used. The earlier
+`854` reading was the same raw field before the dial moved.
+
+For a no-password unit, `--allow-no-password` now exposes the documented FW-01
+SELECT-only workaround behind an explicit flag. It is an authentication bypass
+for an owner-controlled device; prefer setting an Owner password. `AddBrewEvent`
+was still not sent.

@@ -54,11 +54,13 @@ python3 tools/scale_bridge.py --openscale hds.local \
   --grinder 192.168.1.50 --login-role Owner --insecure --apply --yes
 ```
 
-> **No-password Owner units.** On the 2026-11-18 `custom` unit, `login.php`
-> auto-creates an Owner session, but `POST /rest_api/login` rejects an empty
-> Owner password and the UI's bearer header is the literal `$sessionToken`.
-> `--login-role Owner` therefore fails with `Wrong password!`. Set an Owner
-> password first or pass a short-lived `--token` instead. See
+> **Owner passwords.** The 2026-11-18 unit now has an Owner password, so
+> `--login-role Owner --password-file` works normally. On a unit with no Owner
+> password, `login.php` auto-creates a session but `POST /rest_api/login`
+> rejects the empty password and the UI's bearer header is the literal
+> `$sessionToken`; `--login-role Owner` then fails with `Wrong password!`.
+> Set an Owner password, pass a short-lived `--token`, or use the explicit
+> `--allow-no-password` workaround on an owner-controlled device. See
 > [LIVE_VALIDATION.md](LIVE_VALIDATION.md).
 
 If you have a token already, pass `--token` and `--wss-port 9997`. Do not put a

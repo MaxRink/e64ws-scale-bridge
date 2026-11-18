@@ -478,10 +478,18 @@ def _token_for(args: argparse.Namespace) -> str:
         return token
     if not args.login_role:
         raise ValueError("provide --token, --token-file or --login-role")
-    password = args.password
-    if password is None:
+    login, login_no_password, _ = _e64_client()
+    if args.password is not None:
+        password = args.password
+    elif args.password_file:
+        password = Path(args.password_file).read_text().strip()
+    elif args.allow_no_password:
+        print("warning: using the FW-01 SELECT-only no-password workaround; "
+              "use only on an owner-controlled device", file=sys.stderr)
+        return login_no_password(args.grinder, insecure=args.insecure,
+                                 ca_file=args.ca_file)
+    else:
         password = getpass.getpass("local grinder password: ")
-    login, _ = _e64_client()
     return login(
         args.grinder,
         args.login_role,
@@ -571,7 +579,10 @@ def build_parser() -> argparse.ArgumentParser:
     grinder.add_argument("--token", help="existing local WSS token; never printed")
     grinder.add_argument("--token-file", help="read the WSS token from a 0600 file")
     grinder.add_argument("--login-role", help="login locally to obtain a token")
-    grinder.add_argument("--password", help="avoid on the command line; prefer the prompt")
+    grinder.add_argument("--password", help="avoid on the command line; prefer the prompt or --password-file")
+    grinder.add_argument("--password-file", help="read the login password from a 0600 file")
+    grinder.add_argument("--allow-no-password", action="store_true",
+                         help="use the documented FW-01 SELECT-only workaround if no password is supplied")
     grinder.add_argument("--insecure", action="store_true")
     grinder.add_argument("--ca-file")
     grinder.add_argument("--dose-index", type=int, default=1)
