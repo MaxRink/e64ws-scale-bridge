@@ -23,6 +23,7 @@ ESP32 custom firmware
         v
 E64 lighttpd/PHP
   esp-state.json  (fresh for 5 s)
+  state.json      (fresh for 10 s; the daemon heartbeats every 1 s)
         |
         +--> /api/v2/mako --> vendor HMI Xenia Diagnosis / GBS
         +--> /scale/      --> phone/laptop WebUI
@@ -31,6 +32,12 @@ E64 lighttpd/PHP
 The WiFi daemon (`scalebridged`) and the ESP32 gateway can coexist: a fresh
 ESP snapshot wins for `SCALE_BRIDGE_ESP_FRESH_MS` (5 s), then the WiFi state
 resumes. This makes source switching safe without restarting PHP.
+
+Both sources are also gated on age, so a dead source cannot leave the HMI in a
+phase it wrote hours ago: the daemon refreshes `updated_ms` once a second and
+`scale_bridge_state()` treats a file older than `SCALE_BRIDGE_STATE_FRESH_MS`
+(10 s) as idle and disconnected, keeping the shot history but dropping the
+phase. A file without `updated_ms` is not trusted either.
 
 ## Ingest contract (implemented)
 

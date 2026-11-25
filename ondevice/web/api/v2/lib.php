@@ -16,6 +16,10 @@ const SCALE_BRIDGE_BREW_START_DEFAULT = '/run/scale-bridge/brew-start.json';
 const SCALE_BRIDGE_CONFIG_DEFAULT = '/db/scale-bridge/config.json';
 const SCALE_BRIDGE_ESP_STATE_DEFAULT = '/run/scale-bridge/esp-state.json';
 const SCALE_BRIDGE_ESP_FRESH_MS = 5000;
+// The WiFi daemon writes a heartbeat every second, so a state file older than
+// this means the daemon is gone.  Both sources are gated: without it a dead
+// daemon left the last phase it wrote on the HMI forever (a stuck "serving").
+const SCALE_BRIDGE_STATE_FRESH_MS = 10000;
 
 function scale_bridge_env_path(string $name, string $default): string
 {
@@ -65,6 +69,31 @@ function scale_bridge_timestamp(): string
     return date('Y-m-d H:i:s');
 }
 
+/**
+ * Age of a daemon timestamp in milliseconds.
+ *
+ * Both writers use a positive 32-bit millisecond window (scale_bridge_now_ms),
+ * which wraps every ~24.8 days; a plain subtraction would report a fresh file
+ * as 24.8 days old for a few seconds after each wrap.
+ */
+function scale_bridge_age_ms(int $updated_ms, int $now_ms): int
+{
+    $age = ($now_ms - $updated_ms) % 2147483648;
+    return $age < 0 ? $age + 2147483648 : $age;
+}
+
+/** True when *value* was written by a live daemon within *fresh_ms*. */
+function scale_bridge_is_fresh(array $value, int $fresh_ms): bool
+{
+    $updated = (int) ($value['updated_ms'] ?? 0);
+    if ($updated <= 0) {
+        // No timestamp: not written by the current daemon.  Err on the side of
+        // "not live" rather than trusting an unbounded age.
+        return false;
+    }
+    return scale_bridge_age_ms($updated, scale_bridge_now_ms()) <= $fresh_ms;
+}
+
 function scale_bridge_read_json(string $path, array $default = []): array
 {
     if (!is_file($path) || !is_readable($path)) {
@@ -110,10 +139,7 @@ function scale_bridge_esp_state(): ?array
     if ($value === []) {
         return null;
     }
-    $updated = (int) ($value['updated_ms'] ?? 0);
-    $now = scale_bridge_now_ms();
-    $age = $now - $updated;
-    if ($age < 0 || $age > SCALE_BRIDGE_ESP_FRESH_MS) {
+    if (!scale_bridge_is_fresh($value, SCALE_BRIDGE_ESP_FRESH_MS)) {
         return null;
     }
     return $value;
@@ -143,7 +169,30 @@ function scale_bridge_state(): array
     if ($esp !== null) {
         return array_merge($default, $esp);
     }
-    return array_merge($default, scale_bridge_read_json(scale_bridge_state_path()));
+    $state = scale_bridge_read_json(scale_bridge_state_path());
+    if ($state === []) {
+        return $default;
+    }
+    if (!scale_bridge_is_fresh($state, SCALE_BRIDGE_STATE_FRESH_MS)) {
+        // The daemon stopped writing: report idle, not the last phase it left
+        // on disk.  Otherwise a dead daemon holds MA_STATUS=3 (serving) and a
+        // plausible extraction forever -- the same stuck-in-serving failure
+        // the ESP path already handles.  The shot history is kept, but a
+        // finishing window is time-bounded anyway and is not trusted here.
+        $age = scale_bridge_age_ms((int) ($state['updated_ms'] ?? 0), scale_bridge_now_ms());
+        return array_merge($default, $state, [
+            'connected' => false,
+            'phase' => 'idle',
+            'ma_status' => 1,
+            'extraction_status' => 0,
+            'live_grams' => 0.0,
+            'flow_g_s' => 0.0,
+            'active_ms' => 0,
+            'finishing_until_ms' => 0,
+            'error' => sprintf('no fresh state from the scale daemon (%d ms old)', $age),
+        ]);
+    }
+    return array_merge($default, $state);
 }
 
 function scale_bridge_ratio(): array

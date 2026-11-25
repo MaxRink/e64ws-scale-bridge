@@ -152,7 +152,7 @@ snapshot named so you can re-run `--backup <that file>`.
 
 | Method | Path | Behavior |
 |---|---|---|
-| GET | `/api/v2/mako` | Xenia Mako shape; idle/serving/finishing from state |
+| GET | `/api/v2/mako` | Xenia Mako shape; idle/serving/finishing from state, gated on the state file being fresh (10 s) |
 | GET | `/api/v2/machine` | Xenia machine identity |
 | POST | `/api/v2/brewratio` | validate + persist `SYNC_BEVERAGE_WEIGHT`/`SYNC_FILTER`, echo pair |
 | POST | `/api/v2/scripts/execute` | record brew start, echo `{"ok":true,"ID":...}` |
@@ -301,7 +301,7 @@ image.
 Off-device:
 
 ```sh
-# daemon + existing bridge tests (133 tests; the 11 PHP-endpoint tests skip
+# daemon + existing bridge tests (138 tests; the 15 PHP-endpoint tests skip
 # as a group when php is not on PATH, so such a run reports "Ran 107")
 python3 -m unittest discover -s tests -v
 

@@ -319,6 +319,43 @@ class OnDeviceDaemonTests(unittest.TestCase):
             self.assertIn("scale socket closed", state["error"])
             self.assertEqual(state["shot_count"], 0)
 
+    def test_the_state_timestamp_stays_fresh_while_the_scale_is_silent(self) -> None:
+        """The state file is a liveness signal, not just an activity log.
+
+        The PHP layer now refuses to report a phase from an old file, so a
+        healthy daemon that is merely waiting -- a connected scale that is not
+        sending, a reconnect backoff of up to 30 s -- must keep refreshing
+        ``updated_ms``.  Without the heartbeat the stamp froze at connect time
+        and the HMI would have called a live daemon dead.
+        """
+
+        scale = FakeScale([]).start()  # accepts the upgrade, then says nothing
+        self.addCleanup(scale.close)
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.json"
+            daemon = ScaleDaemon(
+                f"ws://127.0.0.1:{scale.port}/snapshot",
+                state_path=str(state_path),
+                shots_path=None,
+                timeout=5.0,  # long enough that recv is still blocked below
+            )
+            thread = threading.Thread(target=daemon.run_forever, daemon=True)
+            thread.start()
+            self.addCleanup(daemon.stop)
+            deadline = time.time() + 5
+            while time.time() < deadline and not state_path.is_file():
+                time.sleep(0.02)
+            self.assertTrue(state_path.is_file(), "the daemon never wrote state")
+            time.sleep(0.3)
+            first = json.loads(state_path.read_text())["updated_ms"]
+            time.sleep(1.4)  # more than one heartbeat, far less than the timeout
+            second = json.loads(state_path.read_text())["updated_ms"]
+            self.assertTrue(daemon.state()["connected"],
+                            "the stream must still be open while we sample")
+            daemon.stop()
+            thread.join(timeout=3)
+        self.assertGreater(second, first, "updated_ms did not advance while idle")
+
     def test_non_monotonic_scale_clock_resets_detector(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             daemon = ScaleDaemon(

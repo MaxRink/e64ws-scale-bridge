@@ -213,6 +213,7 @@ class ScaleDaemon:
         detector: ShotDetector | None = None,
         finishing_ms: int = 3000,
         timeout: float = 10.0,
+        heartbeat_s: float = 1.0,
         verbose: bool = False,
     ) -> None:
         self.url = url
@@ -221,9 +222,11 @@ class ScaleDaemon:
         self.detector = detector or ShotDetector()
         self.finishing_ms = max(0, int(finishing_ms))
         self.timeout = timeout
+        self.heartbeat_s = max(0.05, float(heartbeat_s))
         self.verbose = verbose
         self.stop_event = threading.Event()
         self._lock = threading.Lock()
+        self._write_lock = threading.Lock()
         self._state: dict[str, Any] = {
             "schema": SCHEMA,
             "source": url,
@@ -262,7 +265,10 @@ class ScaleDaemon:
             value = dict(self._state)
         value["updated_ms"] = now_ms()
         try:
-            atomic_json(self.state_path, value)
+            # Serialised: the heartbeat thread and the reader both write, and
+            # atomic_json uses one temp name per target.
+            with self._write_lock:
+                atomic_json(self.state_path, value)
             self._last_write = now
         except OSError as exc:
             self.log(f"state write failed: {exc}")
@@ -407,18 +413,36 @@ class ScaleDaemon:
         self._write_state(force=True)
         self.log(f"connection error: {exc}")
 
+    def _heartbeat(self) -> None:
+        """Keep ``updated_ms`` fresh while the daemon is alive.
+
+        The PHP layer treats an old state file as "no daemon", so the file has
+        to be a liveness signal and not only an activity log: a healthy daemon
+        that is merely waiting -- a silent scale, a reconnect backoff of up to
+        30 s -- writes nothing else, and would otherwise be reported as dead.
+        """
+
+        while not self.stop_event.wait(self.heartbeat_s):
+            self._write_state(force=True)
+
     def run_forever(self) -> None:
         backoff = 1.0
-        while not self.stop_event.is_set():
-            try:
-                self._read_once()
-                backoff = 1.0
-            except (OSError, WebSocketError, OpenScaleProtocolError, ValueError) as exc:
-                if self.stop_event.is_set():
-                    break
-                self._connection_lost(exc)
-                self.stop_event.wait(backoff)
-                backoff = min(backoff * 2, 30.0)
+        beater = threading.Thread(target=self._heartbeat, name="scale-heartbeat",
+                                  daemon=True)
+        beater.start()
+        try:
+            while not self.stop_event.is_set():
+                try:
+                    self._read_once()
+                    backoff = 1.0
+                except (OSError, WebSocketError, OpenScaleProtocolError, ValueError) as exc:
+                    if self.stop_event.is_set():
+                        break
+                    self._connection_lost(exc)
+                    self.stop_event.wait(backoff)
+                    backoff = min(backoff * 2, 30.0)
+        finally:
+            beater.join(timeout=max(1.0, self.heartbeat_s * 2))
 
     def stop(self) -> None:
         self.stop_event.set()
