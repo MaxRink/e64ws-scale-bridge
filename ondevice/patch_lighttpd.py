@@ -23,13 +23,24 @@ It is idempotent and always snapshots the pre-edit file under a unique name
 next to ``--backup``.  The unpatched vendor config is the restore point and is
 refreshed whenever an edit starts from an unpatched file, so a firmware update
 that ships a new vendor config cannot leave ``--restore`` on a stale snapshot.
-``--restore`` copies that exact snapshot back.  The installer runs
-``lighttpd -t`` before restarting and restores the snapshot on failure.
+
+``--restore`` validates the snapshot before it copies a byte: the restore point
+must be a complete lighttpd config, not the truncated file a power loss can
+leave behind.  Every copy -- the snapshot, the restore point and the live
+config -- is written to a sibling ``.tmp`` file, fsynced and renamed, so an
+interrupted write leaves the previous file intact instead of a half file that
+looks complete.  A refusal is loud and exits non-zero; the live config is not
+touched.  The installer runs ``lighttpd -t`` before restarting and restores the
+snapshot on failure.
+
+Exit codes: 0 ok, 2 missing config, 3 no vendor redirect block to patch,
+4 missing backup, 5 backup is not a complete config.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import sys
@@ -70,6 +81,106 @@ $HTTP["url"] =~ "^/api/v2/(mako|machine|brewratio|scripts/execute|ingest)$" {{
 {END}'''
 
 
+def _fsync_directory(path: Path) -> None:
+    """Make the rename in *path* durable; best effort where unsupported."""
+
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
+def _atomic_copy(source: Path, destination: Path) -> None:
+    """Copy *source* to *destination* so a crash cannot leave half a file.
+
+    The bytes go to a sibling ``.tmp`` file, are fsynced, and are renamed over
+    *destination*.  A power loss therefore leaves the previous file or the
+    complete new one -- never the truncated restore point that used to make
+    ``--restore`` brick lighttpd.
+    """
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    tmp = destination.with_name(destination.name + ".tmp")
+    try:
+        with open(source, "rb") as src, open(tmp, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+            dst.flush()
+            os.fsync(dst.fileno())
+        shutil.copystat(source, tmp)
+        os.replace(tmp, destination)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    _fsync_directory(destination.parent)
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Replace *path* with *text* without ever exposing a partial file."""
+
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        shutil.copymode(path, tmp)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    _fsync_directory(path.parent)
+
+
+def validate_config_text(text: str) -> str | None:
+    """Return why *text* cannot be a complete lighttpd config, else ``None``.
+
+    Deliberately structural rather than a lighttpd parse: the device has no
+    lighttpd grammar in Python, and the question that has to be answered
+    before overwriting the live config is only "is this a whole config file?".
+    It catches the truncated restore point (a 39-byte file holding nothing but
+    the vendor comment line) and a garbage or empty backup.
+    """
+
+    if not text.strip():
+        return "the file is empty"
+    if "\x00" in text:
+        return "the file contains binary data"
+    # A truncated file usually dies inside a block, leaving a dangling brace.
+    if text.count("{") != text.count("}"):
+        return (
+            f"it has {text.count('{')} opening and {text.count('}')} closing braces, "
+            "so it was cut off"
+        )
+    if "$HTTP[" not in text and re.search(r"(?m)^\s*server\.", text) is None:
+        return "it holds no lighttpd directive ($HTTP[...] or server.*)"
+    return None
+
+
+def _describe_snapshots(backup: Path) -> str:
+    """Name the sibling snapshots that do look complete, for the operator."""
+
+    usable = []
+    for candidate in sorted(backup.parent.glob(backup.name + ".*")):
+        try:
+            text = candidate.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if validate_config_text(text) is None:
+            usable.append(candidate)
+    if not usable:
+        return ""
+    return (
+        f"\n       a complete snapshot exists: {usable[-1]}"
+        f"\n       re-run with --backup {usable[-1]}"
+    )
+
+
 def snapshot(config: Path, backup: Path) -> Path:
     """Copy the pre-edit config to a unique sibling of *backup*."""
 
@@ -81,7 +192,7 @@ def snapshot(config: Path, backup: Path) -> Path:
     while candidate.exists():
         candidate = backup.with_name(f"{base}.{index}")
         index += 1
-    shutil.copy2(config, candidate)
+    _atomic_copy(config, candidate)
     print(f"snapshotted pre-edit config to {candidate}")
     return candidate
 
@@ -102,7 +213,7 @@ def patch(config: Path, backup: Path) -> int:
         # Our own older block is not a vendor file: snapshot it for rollback
         # evidence, but leave the canonical vendor restore point alone.
         snapshot(config, backup)
-        config.write_text(updated)
+        _atomic_write_text(config, updated)
         print("updated existing lighttpd patch block")
         return 0
     patched, count = REDIRECT.subn(PATCH, text, count=1)
@@ -113,18 +224,35 @@ def patch(config: Path, backup: Path) -> int:
     # point: after a firmware update the file is a new vendor revision, so the
     # backup from the previous revision is stale and must not be kept.
     snapshot_path = snapshot(config, backup)
-    shutil.copy2(snapshot_path, backup)
+    _atomic_copy(snapshot_path, backup)
     print(f"recorded vendor restore point {backup}")
-    config.write_text(patched)
+    _atomic_write_text(config, patched)
     print("patched lighttpd HTTP redirect for /api/v2/")
     return 0
 
 
 def restore(config: Path, backup: Path) -> int:
-    if not backup.exists():
+    if not backup.is_file():
         print(f"error: backup {backup} not found", file=sys.stderr)
         return 4
-    shutil.copy2(backup, config)
+    try:
+        text = backup.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        print(f"error: cannot read backup {backup}: {exc}", file=sys.stderr)
+        return 5
+    problem = validate_config_text(text)
+    if problem is not None:
+        print(
+            f"error: refusing to restore {config} from {backup}: {problem}",
+            file=sys.stderr,
+        )
+        print(
+            "       the backup is not a complete lighttpd config; the live config "
+            "was not touched" + _describe_snapshots(backup),
+            file=sys.stderr,
+        )
+        return 5
+    _atomic_copy(backup, config)
     print(f"restored {config} from {backup}")
     return 0
 

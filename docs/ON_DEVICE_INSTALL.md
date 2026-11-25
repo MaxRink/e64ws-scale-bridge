@@ -138,6 +138,16 @@ next install instead of restoring a stale file. `--restore` (and
 before the restart and the snapshot is restored if it fails. Use
 `--no-lighttpd` only if you serve Xenia from a different host/port.
 
+Every copy in this path -- the snapshot, the restore point and the live config
+-- is written to a `.tmp` file, fsynced and renamed, so a power loss during a
+write leaves the previous file intact rather than a half file that looks
+complete. `--restore` also validates the snapshot before it copies anything:
+the file must be non-empty, brace-balanced and hold at least one lighttpd
+directive. A backup that fails that check (a truncated restore point from an
+interrupted snapshot, a garbage file) is refused loudly -- exit code 5, the
+live config untouched, and the newest complete `lighttpd.conf.vendor.*`
+snapshot named so you can re-run `--backup <that file>`.
+
 ## Endpoints
 
 | Method | Path | Behavior |
@@ -291,8 +301,8 @@ image.
 Off-device:
 
 ```sh
-# daemon + existing bridge tests (110 tests; the 11 PHP-endpoint tests skip
-# as a group when php is not on PATH, so such a run reports "Ran 99")
+# daemon + existing bridge tests (118 tests; the 11 PHP-endpoint tests skip
+# as a group when php is not on PATH, so such a run reports "Ran 107")
 python3 -m unittest discover -s tests -v
 
 # PHP 8.4 endpoints/page/ESP32 ingest, in Docker
