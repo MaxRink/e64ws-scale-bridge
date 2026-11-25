@@ -101,7 +101,7 @@ See [docs/ESP32_SCALE.md](docs/ESP32_SCALE.md), [docs/STOCK_OPTIONS.md](docs/STO
 
 The WiFi bridge can run **on the grinder itself** on a rooted unit. A
 dependency-free daemon reads `ws://<scale>/snapshot`, detects a shot, and
-writes live state. PHP serves the four Xenia routes from the grinder's own web
+writes live state. PHP serves the five Xenia routes from the grinder's own web
 root, so the E64 M2M client can point at `127.0.0.1` or the grinder's LAN
 address. The vendor HMI is not patched; the stock M2M screen is the display.
 
@@ -116,7 +116,11 @@ vi /db/scale-bridge/config.json
 This path is rooted-stock, not stock no-root, and it does **not** add BLE to
 the E64. The installer adds a narrow lighttpd exception for `/api/v2/` because
 the E64 Xenia client is HTTP-only while the vendor web server redirects HTTP to
-HTTPS. The built-in HMI already has a Xenia Diagnosis screen; the bridge feeds
+HTTPS. That exception is plain HTTP, so the five local Xenia routes — including
+the `POST /api/v2/brewratio` write and the `X-Scale-Token` header on
+`/api/v2/ingest` — cross the LAN in cleartext. That is acceptable only on a
+trusted, isolated LAN: do not expose port 80 to the internet or to an untrusted
+network. The built-in HMI already has a Xenia Diagnosis screen; the bridge feeds
 its Output Amount (live grams), Flow Rate, Real Extraction Time and Machine
 Status fields without patching QML. GBS consumption of the Xenia extraction
 time is still the physical A/B gate.
@@ -137,12 +141,14 @@ the assisted dial-in plugin is
 python3 -m unittest discover -s tests -v
 ```
 
-61 Python tests cover the Decent/generic parsers, shot detection, event units,
-the Xenia emulator routes, the on-device daemon and the lighttpd patch. Eleven
-PHP 8.4 tests cover the on-device Xenia endpoints, WebUI page, ESP32 ingest and
-state freshness (`./tools/run_php_tests.sh`). The
-bridge was also exercised against the QEMU E64: an
-18 g / 24.6 s replay produced `brewTimeMs=24600`, `brewWeightMg=18000`,
+101 Python tests cover the Decent/generic parsers, shot detection, event units,
+the WSS client's timeout/redaction paths, the Xenia emulator routes, the
+on-device daemon, the lighttpd snapshot/restore patch and these docs. Eleven of
+them exercise the on-device Xenia endpoints, WebUI page, ESP32 ingest and state
+freshness; they skip as a group when `php` is not on `PATH` (such a run reports
+"Ran 90") and `./tools/run_php_tests.sh` runs the same eleven against PHP 8.4 in
+Docker. The bridge was also exercised against the QEMU E64: an 18 g / 24.6 s
+replay produced `brewTimeMs=24600`, `brewWeightMg=18000`,
 `validity=true`, and `AddBrewEvent` returned `{"success": true}` in development
 mode.
 
@@ -153,5 +159,9 @@ mode.
   physical check was transport/login-gate plus a read-only state capture.
 - Stock grinder control is gated; see the stock options.
 - The Xenia emulator is a protocol fixture, not a coffee-machine replacement.
+- Known review gaps (token refresh, TLS pinning, WSS reconnect, tare, the
+  dropout event path) are listed with their status in
+  [docs/REVIEW_FOLLOWUPS.md](docs/REVIEW_FOLLOWUPS.md); they are not silently
+  dropped.
 
 License: GPL-3.0-or-later. See [LICENSE](LICENSE).

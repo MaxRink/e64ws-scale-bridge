@@ -75,7 +75,7 @@ Rules:
 - Body limit is 16 KiB. The endpoint writes `/run/scale-bridge/esp-state.json`
   atomically and never exposes control actions.
 
-The four Xenia routes are unchanged; the HMI sees the ESP state through
+The five Xenia routes are unchanged; the HMI sees the ESP state through
 `/api/v2/mako` exactly as it sees the WiFi daemon.
 
 ## Implemented in dev

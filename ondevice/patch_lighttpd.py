@@ -9,9 +9,15 @@ fail before PHP is reached.
 This script makes one narrow, marked change:
 
 * exempt only ``/api/v2/*`` from the HTTP->HTTPS redirect;
-* rewrite the four exact Xenia paths to their ``index.php`` so the client does
+* rewrite the five exact Xenia paths to their ``index.php`` so the client does
   not have to follow a directory redirect;
 * leave every other HTTP path redirected to HTTPS.
+
+The exemption is a deliberate cleartext trade-off: everything under ``/api/v2/``
+(including the ``brewratio`` write and the ESP32 ``X-Scale-Token`` header) is
+readable and injectable on the LAN path.  It is accepted only for a trusted,
+isolated LAN; the E64 client cannot use TLS, so narrowing the exemption would
+break the M2M path.  See docs/REVIEW_FOLLOWUPS.md.
 
 It is idempotent and always snapshots the pre-edit file under a unique name
 next to ``--backup``.  The unpatched vendor config is the restore point and is
@@ -43,8 +49,14 @@ REDIRECT = re.compile(
 
 PATCH = f'''{BEGIN}
 # The E64 Xenia client is HTTP-only (RestClient::open(host, 80)). Exempt the
-# four local Xenia routes from the global HTTPS redirect and rewrite them to
+# five local Xenia routes from the global HTTPS redirect and rewrite them to
 # their index.php files so no directory redirect is needed.
+#
+# TRADE-OFF (deliberate, do not "fix" silently): this makes every /api/v2/
+# request plain HTTP on the LAN. POST /api/v2/brewratio therefore writes the
+# SYNC_BEVERAGE_WEIGHT/SYNC_FILTER pair in the clear, and /api/v2/ingest sends
+# its X-Scale-Token header in the clear. Only run this on a trusted, isolated
+# LAN and never expose port 80 to the internet. See docs/REVIEW_FOLLOWUPS.md.
 $HTTP["scheme"] == "http" {{
     $HTTP["url"] !~ "^/api/v2/" {{
         $HTTP["host"] =~ ".*" {{

@@ -4,7 +4,7 @@ Status: **implemented and host/PHP-tested; not yet run on a physical E64.**
 This is the WiFi/rooted path from
 [`ON_DEVICE_SCALE_BRIDGE.md`](ON_DEVICE_SCALE_BRIDGE.md): a small daemon reads
 an OpenScale/HDS `ws://<scale>/snapshot` stream, detects a shot, and writes an
-atomic state file. PHP serves the four Xenia routes on the grinder's own port
+atomic state file. PHP serves the five Xenia routes on the grinder's own port
 80, so the E64 M2M client can point at `127.0.0.1` or the grinder's LAN address.
 The vendor HMI is **not** patched; the stock M2M screen is the display.
 
@@ -106,9 +106,19 @@ redirects every HTTP request to HTTPS, so an unpatched grinder would return
 block that:
 
 - exempts only `^/api/v2/` from the HTTP->HTTPS redirect;
-- rewrites the four exact Xenia paths to their `index.php` so no directory
-  redirect is needed;
+- rewrites the five exact Xenia paths (`mako`, `machine`, `brewratio`,
+  `scripts/execute`, `ingest`) to their `index.php` so no directory redirect is
+  needed;
 - leaves every other HTTP path redirected to HTTPS.
+
+**Cleartext trade-off.** The exemption is plain HTTP by design, so every request
+under `/api/v2/` is readable and injectable on the LAN path: the
+`POST /api/v2/brewratio` write carries the `SYNC_BEVERAGE_WEIGHT`/`SYNC_FILTER`
+pair, and `/api/v2/ingest` carries its `X-Scale-Token` header in the clear. This
+is accepted only for a trusted, isolated LAN on a unit that is not reachable
+from the internet; the E64 client cannot use TLS, so restricting the exemption
+would break the M2M path. Same text in the comment of the installed block
+(`ondevice/patch_lighttpd.py`).
 
 Every edit snapshots the pre-edit file under a unique name
 (`/db/scale-bridge/lighttpd.conf.vendor.<UTC timestamp>`) before it writes.
@@ -128,6 +138,7 @@ before the restart and the snapshot is restored if it fails. Use
 | GET | `/api/v2/machine` | Xenia machine identity |
 | POST | `/api/v2/brewratio` | validate + persist `SYNC_BEVERAGE_WEIGHT`/`SYNC_FILTER`, echo pair |
 | POST | `/api/v2/scripts/execute` | record brew start, echo `{"ok":true,"ID":...}` |
+| POST | `/api/v2/ingest` | ESP32 gateway snapshot; requires the `X-Scale-Token` header |
 
 The first two are unauthenticated by design because the E64 M2M client does not
 log in. They expose only shot state, not grinder actions. Do not expose port 80
@@ -170,7 +181,7 @@ There are two different UIs on the E64:
 | UI | What it is | What this project does |
 |---|---|---|
 | Graphical HMI | Qt/QML `NgxUiApp` + `libNgxUi.so`, 320×480, rotary/6 keys, no touch | **Not patched.** Uses the vendor M2M/coffee-machine screen. |
-| Web UI | lighttpd/PHP at `https://<grinder>/` | Adds `/scale/` (read-only live weight/last shot) and the four Xenia routes. |
+| Web UI | lighttpd/PHP at `https://<grinder>/` | Adds `/scale/` (read-only live weight/last shot) and the five Xenia routes (the Xenia routes are also reachable over the cleartext HTTP exception). |
 
 ### Current, low-risk integration: vendor M2M screen
 
@@ -261,8 +272,10 @@ image.
 - `/run/scale-bridge` and `/db/scale-bridge` are owned by `www-data`.
 - The WebUI page uses the vendor `sessionManager.php`; it is not a new auth
   system. It is read-only.
-- The Xenia endpoints are local-only by intent. If the grinder is on an
-  untrusted LAN, restrict port 80 or put the unit behind a trusted network.
+- The Xenia endpoints are local-only by intent **and unencrypted**: `/api/v2/*`
+  is exempt from the HTTPS redirect, so brewratio writes and the ESP32
+  `X-Scale-Token` header travel in cleartext. If the grinder is on an untrusted
+  LAN, restrict port 80 or put the unit behind a trusted network.
 - No cloud calls, tokens, vendor keys or official-scale identity are used.
 
 ## Verification
@@ -270,7 +283,8 @@ image.
 Off-device:
 
 ```sh
-# daemon + existing bridge tests (55 tests, 1 skip when PHP is absent)
+# daemon + existing bridge tests (101 tests; the 11 PHP-endpoint tests skip
+# as a group when php is not on PATH, so such a run reports "Ran 90")
 python3 -m unittest discover -s tests -v
 
 # PHP 8.4 endpoints/page/ESP32 ingest, in Docker
@@ -279,9 +293,10 @@ python3 -m unittest discover -s tests -v
 
 The daemon test uses a fake RFC 6455 scale and a real shot sequence: five idle
 samples, a rise, a stable 18 g window. It asserts state, phase, finishing,
-history and non-monotonic clock handling. The PHP tests cover all four routes,
-validation, finishing expiry and the WebUI page. A separate test covers the
-lighttpd patch/restore and a PHP-source check for the E64's missing `filter`
+history and non-monotonic clock handling. The PHP tests cover all five routes,
+validation, finishing expiry and the WebUI page. Separate tests cover the
+lighttpd snapshot/patch/restore round-trip, the WSS client's timeout and
+redaction paths, and a PHP-source check for the E64's missing `filter`
 extension.
 
 QEMU evidence (from-SWU image, 2026-10-31): after `install.sh`, HTTP
@@ -311,7 +326,13 @@ Physical (requires owner authorization):
 3. Pull a real shot; verify `REAL_EXTRACTION_TIME_MS` and whether GBS moves the
    dial. This is the make-or-break claim.
 4. Repeat at 15 s and 45 s, ≥3 reps, with a no-injection control.
-5. Check `/db` survival, signed-update loss/reapply, and uninstall.
+5. Check `/db` survival, signed-update loss/reapply, and uninstall. When you
+   record evidence, **redact before it leaves the device**: the `ingest_token`
+   value in `/db/scale-bridge/config.json`, any `X-Scale-Token`/`Authorization`
+   header, and the `?token=` query value of a WSS URL. Keep the config file at
+   mode `0640`; paste only placeholders (`<redacted>`) into a ticket or chat.
+   The WSS client already redacts its own error lines
+   (`e64ws_client.redact`); shell history and `curl -v` output are not covered.
 
 ## Limitations
 
@@ -328,6 +349,10 @@ Physical (requires owner authorization):
   the 44 dev WSS actions remain unavailable; this path uses Xenia only.
 - **No stock no-root install.** Writing `/usr/local/www` and `/etc/init.d`
   requires root.
+
+Open review items (token refresh, TLS pinning, WSS reconnect, tare, the dropout
+event path) are listed with their status in
+[REVIEW_FOLLOWUPS.md](REVIEW_FOLLOWUPS.md).
 
 ## Recovery
 
