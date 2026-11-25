@@ -91,7 +91,7 @@ finishing and then idle. `--max-shot-ms` overrides the config value.
 | `/usr/local/www/api/v2/` | Xenia routes | No; re-run installer |
 | `/usr/local/www/scale/` | WebUI status page | No; re-run installer |
 | `/etc/init.d/S95scalebridge` | start/stop hook | No; re-run installer |
-| `/etc/lighttpd/lighttpd.conf` | narrow `/api/v2/` HTTP exception | No; backup in `/db/scale-bridge/lighttpd.conf.vendor` |
+| `/etc/lighttpd/lighttpd.conf` | narrow `/api/v2/` HTTP exception | No; vendor snapshot in `/db/scale-bridge/lighttpd.conf.vendor*` |
 
 The installer refuses to overwrite an existing `/usr/local/www/api/v2` or init
 script unless it owns it (marker) or `--force` is used. It never remounts,
@@ -110,9 +110,15 @@ block that:
   redirect is needed;
 - leaves every other HTTP path redirected to HTTPS.
 
-The vendor config is backed up first; `lighttpd -t` is run before restart, and
-the backup is restored on failure or on `uninstall.sh`. Use `--no-lighttpd`
-only if you serve Xenia from a different host/port.
+Every edit snapshots the pre-edit file under a unique name
+(`/db/scale-bridge/lighttpd.conf.vendor.<UTC timestamp>`) before it writes.
+`/db/scale-bridge/lighttpd.conf.vendor` is the restore point and holds the
+exact bytes of the unpatched vendor config that the current block was applied
+to, so a firmware update that ships a new vendor config refreshes it on the
+next install instead of restoring a stale file. `--restore` (and
+`uninstall.sh`) copies that snapshot back byte-for-byte. `lighttpd -t` is run
+before the restart and the snapshot is restored if it fails. Use
+`--no-lighttpd` only if you serve Xenia from a different host/port.
 
 ## Endpoints
 

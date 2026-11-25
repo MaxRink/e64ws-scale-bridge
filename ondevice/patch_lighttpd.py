@@ -13,8 +13,12 @@ This script makes one narrow, marked change:
   not have to follow a directory redirect;
 * leave every other HTTP path redirected to HTTPS.
 
-It is idempotent, keeps a vendor backup, and can restore it.  The installer
-runs ``lighttpd -t`` before restarting and restores the backup on failure.
+It is idempotent and always snapshots the pre-edit file under a unique name
+next to ``--backup``.  The unpatched vendor config is the restore point and is
+refreshed whenever an edit starts from an unpatched file, so a firmware update
+that ships a new vendor config cannot leave ``--restore`` on a stale snapshot.
+``--restore`` copies that exact snapshot back.  The installer runs
+``lighttpd -t`` before restarting and restores the snapshot on failure.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ import argparse
 import re
 import shutil
 import sys
+import time
 from pathlib import Path
 
 BEGIN = "# BEGIN E64 scale bridge Xenia HTTP"
@@ -53,6 +58,22 @@ $HTTP["url"] =~ "^/api/v2/(mako|machine|brewratio|scripts/execute|ingest)$" {{
 {END}'''
 
 
+def snapshot(config: Path, backup: Path) -> Path:
+    """Copy the pre-edit config to a unique sibling of *backup*."""
+
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    base = f"{backup.name}.{stamp}"
+    candidate = backup.with_name(base)
+    index = 1
+    while candidate.exists():
+        candidate = backup.with_name(f"{base}.{index}")
+        index += 1
+    shutil.copy2(config, candidate)
+    print(f"snapshotted pre-edit config to {candidate}")
+    return candidate
+
+
 def patch(config: Path, backup: Path) -> int:
     text = config.read_text()
     if BEGIN in text:
@@ -66,6 +87,9 @@ def patch(config: Path, backup: Path) -> int:
             count=1,
             flags=re.DOTALL,
         )
+        # Our own older block is not a vendor file: snapshot it for rollback
+        # evidence, but leave the canonical vendor restore point alone.
+        snapshot(config, backup)
         config.write_text(updated)
         print("updated existing lighttpd patch block")
         return 0
@@ -73,10 +97,12 @@ def patch(config: Path, backup: Path) -> int:
     if count != 1:
         print("error: vendor redirect block not found; refusing to patch", file=sys.stderr)
         return 3
-    if not backup.exists():
-        backup.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(config, backup)
-        print(f"backed up vendor config to {backup}")
+    # Always snapshot the pre-edit file, and make *this* snapshot the restore
+    # point: after a firmware update the file is a new vendor revision, so the
+    # backup from the previous revision is stale and must not be kept.
+    snapshot_path = snapshot(config, backup)
+    shutil.copy2(snapshot_path, backup)
+    print(f"recorded vendor restore point {backup}")
     config.write_text(patched)
     print("patched lighttpd HTTP redirect for /api/v2/")
     return 0
