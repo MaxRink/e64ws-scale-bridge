@@ -55,8 +55,9 @@ def _frame(text: str) -> bytes:
 
 
 class FakeScale:
-    def __init__(self, samples: list[dict]) -> None:
+    def __init__(self, samples: list[dict], *, drop_after: int | None = None) -> None:
         self.samples = samples
+        self.drop_after = drop_after
         self.sock = socket.socket()
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind(("127.0.0.1", 0))
@@ -87,11 +88,14 @@ class FakeScale:
                 b"Connection: Upgrade\r\n"
                 b"\r\n"
             )
-            for sample in self.samples:
+            for index, sample in enumerate(self.samples, 1):
                 if self.stop.is_set():
                     return
                 conn.sendall(_frame(json.dumps(sample)))
                 time.sleep(0.02)
+                if self.drop_after is not None and index >= self.drop_after:
+                    # Drop the stream the way a scale does when it reboots.
+                    return
             # Hold the connection open while the test inspects the state.
             while not self.stop.wait(0.05):
                 pass
@@ -355,6 +359,55 @@ class OnDeviceDaemonTests(unittest.TestCase):
             daemon.stop()
             thread.join(timeout=3)
         self.assertGreater(second, first, "updated_ms did not advance while idle")
+
+    def test_a_stream_that_drops_mid_shot_is_discarded_through_run_forever(self) -> None:
+        """The dropout handling must be wired into the read loop, not only callable.
+
+        The older test calls daemon._connection_lost directly, so nothing
+        proved that run_forever actually routes a dropped stream there.
+        """
+
+        samples = [{"grams": 0.0, "ms": index * 100} for index in range(5)]
+        samples += [{"grams": 2.0, "ms": 500}, {"grams": 9.0, "ms": 700},
+                    {"grams": 18.0, "ms": 900}]
+        scale = FakeScale(samples, drop_after=len(samples)).start()
+        self.addCleanup(scale.close)
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.json"
+            daemon = ScaleDaemon(
+                f"ws://127.0.0.1:{scale.port}/snapshot",
+                state_path=str(state_path),
+                shots_path=None,
+                detector=ShotDetector(baseline_samples=3, min_duration_ms=5000.0),
+                timeout=0.5,
+            )
+            thread = threading.Thread(target=daemon.run_forever, daemon=True)
+            thread.start()
+            self.addCleanup(daemon.stop)
+
+            deadline = time.time() + 10
+            while time.time() < deadline and daemon.state()["ma_status"] != 3:
+                time.sleep(0.02)
+            self.assertEqual(daemon.state()["ma_status"], 3,
+                             "the shot never started; the fake scale did not feed")
+
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                state = daemon.state()
+                if state["phase"] == "idle" and state["connected"] is False:
+                    break
+                time.sleep(0.02)
+            state = daemon.state()
+            daemon.stop()
+            thread.join(timeout=5)
+
+        self.assertEqual(state["phase"], "idle")
+        self.assertEqual(state["ma_status"], 1)
+        self.assertEqual(state["extraction_status"], 0)
+        self.assertFalse(state["connected"])
+        self.assertEqual(state["shot_count"], 0, "a partial shot must not be reported")
+        self.assertTrue(state["error"], "the drop must be recorded as an error")
+        self.assertFalse(daemon.detector.active)
 
     def test_non_monotonic_scale_clock_resets_detector(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
