@@ -273,14 +273,6 @@ class ShotDetector:
         self._peak_g = max(self._peak_g, sample.grams)
         elapsed = sample.ms - self._start_ms
 
-        if elapsed >= self.max_shot_ms:
-            # A reading that never settles (a drifting cup, a stuck sensor) must
-            # not leave the detector active forever: that keeps the on-device
-            # status in serving and nothing else can start.  Close it as an
-            # explicitly invalid shot so the caller still sees an audit event.
-            mass = sample.grams - self._start_g
-            return self._finish(sample.ms, mass, "timeout", valid=False)
-
         if elapsed >= self.min_duration_ms:
             cutoff = sample.ms - self.stable_ms
             window = [s for s in self._samples if s.ms >= cutoff]
@@ -295,6 +287,16 @@ class ShotDetector:
                 previous = self._samples[-2] if len(self._samples) >= 2 else sample
                 mass = previous.grams - self._start_g
                 return self._finish(previous.ms, mass, "cup removed / weight drop")
+
+        if elapsed >= self.max_shot_ms:
+            # A reading that never settles (a drifting cup, a stuck sensor) must
+            # not leave the detector active forever: that keeps the on-device
+            # status in serving and nothing else can start.  Close it as an
+            # explicitly invalid shot so the caller still sees an audit event.
+            # Checked after the genuine ends so a real finish at the bound keeps
+            # its own reason.
+            mass = sample.grams - self._start_g
+            return self._finish(sample.ms, mass, "timeout", valid=False)
         return None
 
 
