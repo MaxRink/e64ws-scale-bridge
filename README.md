@@ -60,7 +60,9 @@ The detector needs a short stable baseline, starts on a rise above
 shot valid only at `>15 s` (the documented Sync window). The event uses
 milliseconds and milligrams. A shot that never settles is closed at
 `--max-shot-ms` (default 120 s) as `validity: false` / `reason: "timeout"`
-instead of staying active forever.
+instead of staying active forever. The idle baseline re-seeds when the reading
+settles at a new level, so removing the cup after a shot does not disarm the
+next one.
 
 ## Supported inputs
 

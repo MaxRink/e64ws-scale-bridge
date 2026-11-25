@@ -98,7 +98,10 @@ for the stock path. The E64 WSS path above is separate and development-gated.
 | `--max-shot-ms` | 120000 | hard bound; a longer active shot closes as `timeout` |
 
 The detector never guesses a stable baseline from a rising trend. It updates
-the baseline only while the reading is within the stability tolerance.
+the baseline only while the reading is within the stability tolerance, and
+re-seeds it when the idle reading settles at a new level (the cup removed after
+a shot, a drip tray, a re-tare). Without that re-seed the idle window would stay
+frozen on the old level and the next shot would never be detected.
 
 `--max-shot-ms` is a hard bound on an active shot. A reading that drifts and
 never meets the `--stability-g` finish window (a cup that keeps moving, a stuck

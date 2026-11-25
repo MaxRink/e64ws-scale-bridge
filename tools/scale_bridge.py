@@ -164,6 +164,7 @@ class ShotDetector:
         self.drop_threshold_g = drop_threshold_g
         self.max_shot_ms = max_shot_ms
         self._idle: list[ScaleSample] = []
+        self._drift: list[ScaleSample] = []
         self._baseline: float | None = None
         self._last_ms: float | None = None
         self._active = False
@@ -184,15 +185,9 @@ class ShotDetector:
 
         return self._start_ms
 
-    def _idle_baseline(self) -> float:
-        if self._baseline is None:
-            if not self._idle:
-                raise ValueError("no baseline sample")
-            self._baseline = statistics.median(s.grams for s in self._idle)
-        return self._baseline
-
     def _reset_after_shot(self) -> None:
         self._idle = []
+        self._drift = []
         self._baseline = None
         self._active = False
         self._samples = []
@@ -245,15 +240,33 @@ class ShotDetector:
                 self._start_g = self._baseline
                 self._samples = list(self._idle)
                 self._peak_g = sample.grams
+                self._drift = []
                 return None
             # Track slow drift only while the reading is genuinely stable.  A
             # continuously rising pre-infusion must not drag the baseline up
             # with it, which would hide the shot start.
             if abs(sample.grams - self._baseline) <= self.stability_g:
+                self._drift = []
                 self._idle.append(sample)
                 if len(self._idle) > self.baseline_samples:
                     self._idle.pop(0)
                 self._baseline = statistics.median(s.grams for s in self._idle)
+                return None
+            # Outside the window: the scale may simply have settled at a new
+            # level (the cup removed after a shot, a drip tray, a re-tare).
+            # Without this the window freezes on the old level forever and the
+            # next shot is never detected.  Re-seed only from a candidate
+            # window that is itself stable, so a rising trend is never absorbed
+            # into the baseline.
+            self._drift.append(sample)
+            if len(self._drift) > self.baseline_samples:
+                self._drift.pop(0)
+            if len(self._drift) >= self.baseline_samples:
+                levels = [s.grams for s in self._drift]
+                if max(levels) - min(levels) <= self.stability_g:
+                    self._idle = list(self._drift)
+                    self._baseline = statistics.median(levels)
+                    self._drift = []
             return None
 
         self._samples.append(sample)

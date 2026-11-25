@@ -180,6 +180,50 @@ class ShotDetectorTests(unittest.TestCase):
         self.assertEqual(shot.reason, "stable weight")
         self.assertTrue(shot.valid)
 
+    def test_idle_reseeds_after_the_cup_is_removed(self) -> None:
+        # Regression: after a shot the idle window seeded on the post-shot
+        # level (the cup still on the scale) and then froze when the cup was
+        # removed, so the next shot never started again.
+        detector = ShotDetector(
+            baseline_samples=3,
+            min_duration_ms=1000.0,
+            valid_min_ms=1000.0,
+            stable_ms=500.0,
+        )
+        first = self._feed(detector, [
+            (0.0, 0.0), (0.0, 200.0), (0.0, 400.0),
+            (2.0, 600.0), (10.0, 800.0),
+            (18.0, 1000.0), (18.0, 1200.0), (18.0, 1400.0), (18.0, 1600.0),
+        ])
+        self.assertIsNotNone(first)
+        assert first is not None
+        self.assertAlmostEqual(first.mass_g, 18.0, places=1)
+        # The cup is still on the scale, so the idle baseline seeds at 18 g.
+        self._feed(detector, [(18.0, ms) for ms in (1800.0, 2000.0, 2200.0, 2400.0)])
+        # ... and is then removed: the idle level is 0 g, far outside the window.
+        self._feed(detector, [(0.0, ms) for ms in (2600.0, 2800.0, 3000.0, 3200.0)])
+        second = self._feed(detector, [
+            (2.0, 3400.0), (10.0, 3600.0),
+            (18.0, 3800.0), (18.0, 4000.0), (18.0, 4200.0), (18.0, 4400.0),
+        ])
+        self.assertIsNotNone(second, "the detector must re-arm after the level moved")
+        assert second is not None
+        self.assertAlmostEqual(second.baseline_g, 0.0, places=3)
+        self.assertAlmostEqual(second.mass_g, 18.0, places=1)
+
+    def test_idle_drift_reseeds_instead_of_keeping_a_stale_baseline(self) -> None:
+        detector = ShotDetector(baseline_samples=3, start_threshold_g=0.5)
+        self._feed(detector, [(0.0, 0.0), (0.0, 200.0), (0.0, 400.0)])
+        # A single 0.3 g step is above the 0.15 g stability window but below the
+        # 0.5 g start threshold: the resting level is now 0.3 g.
+        self._feed(detector, [(0.3, ms) for ms in (600.0, 800.0, 1000.0, 1200.0)])
+        # A 0.4 g rise from that level is not a shot.  With a frozen 0 g
+        # baseline the same rise looks like a 0.7 g rise and starts a phantom
+        # shot.
+        self._feed(detector, [(0.7, 1400.0)])
+        self.assertFalse(detector.active)
+        self.assertAlmostEqual(detector._baseline, 0.3, places=3)
+
     def test_rejects_non_monotonic_timestamps(self) -> None:
         detector = ShotDetector()
         detector.add(ScaleSample(0.0, 10.0))
