@@ -94,8 +94,10 @@ running `scalebridged.py` by hand.
 |---|---|---|
 | `/storage/scale-bridge/` | daemon + copied detector/parser modules | Usually (A/B); `upload_swu.php?prepare` wipes `/storage` |
 | `/db/scale-bridge/config.json` | scale address and tuning | Yes |
-| `/db/scale-bridge/shots.jsonl` | one JSON line per completed shot | Yes |
+| `/db/scale-bridge/shots.jsonl` | one JSON line per completed shot; rotated to `shots.jsonl.1` at 4 MiB, so at most ~8 MiB is kept | Yes |
+| `/db/scale-bridge/lighttpd.conf.vendor*` | restore point + the newest 5 pre-edit snapshots; older ones are pruned | Yes |
 | `/run/scale-bridge/state.json` | live state for PHP/WebUI | No (tmpfs) |
+| `/log/scalebridged.log` | daemon stdout/stderr; rotated to `.1` at 1 MiB when the init script starts it | No (rootfs) |
 | `/usr/local/www/api/v2/` | Xenia routes | No; re-run installer |
 | `/usr/local/www/scale/` | WebUI status page | No; re-run installer |
 | `/etc/init.d/S95scalebridge` | start/stop hook | No; re-run installer |
@@ -104,6 +106,13 @@ running `scalebridged.py` by hand.
 The installer refuses to overwrite an existing `/usr/local/www/api/v2` or init
 script unless it owns it (marker) or `--force` is used. It never remounts,
 patches the HMI, or touches the ESP32.
+
+Nothing on the device grows without a bound: the shot history, the daemon log
+and the pre-edit lighttpd snapshots are all capped (see the table). The caps
+are `SHOTS_MAX_BYTES`/`SHOTS_KEEP` in `ondevice/scalebridged.py`,
+`SNAPSHOT_KEEP` in `ondevice/patch_lighttpd.py`, and
+`SCALE_BRIDGE_LOG_MAX_BYTES` (default 1 MiB, one rotated file) in
+`ondevice/S95scalebridge`.
 
 ### Why lighttpd is patched
 
@@ -301,7 +310,7 @@ image.
 Off-device:
 
 ```sh
-# daemon + bridge + uninstall tests (146 tests; the 15 PHP-endpoint tests skip
+# daemon + bridge + uninstall tests (150 tests; the 15 PHP-endpoint tests skip
 # as a group when php is not on PATH, and the 4 uninstall tests skip without
 # Docker)
 python3 -m unittest discover -s tests -v

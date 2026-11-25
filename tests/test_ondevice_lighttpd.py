@@ -224,6 +224,30 @@ class RestoreValidationTests(unittest.TestCase):
             self.assertEqual(code, 5)
             self.assertEqual(config.read_text(), patched)
 
+    def test_old_snapshots_are_pruned(self) -> None:
+        # One snapshot per edit with nothing pruning them is a slow leak.  The
+        # cap is written as a value so this fails on the leak, not on a missing
+        # constant.
+        keep = 5
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "lighttpd.conf"
+            backup = Path(tmp) / "lighttpd.conf.vendor"
+            for index in range(keep + 4):
+                config.write_text(VENDOR + f"# revision {index}\n")
+                self.assertEqual(patch(config, backup), 0)
+            snapshots = sorted(
+                item.name for item in Path(tmp).glob("lighttpd.conf.vendor.*")
+                if item.name != "lighttpd.conf.vendor"
+            )
+            self.assertEqual(len(snapshots), keep)
+            # Each snapshot holds the pre-edit file, so the kept window is the
+            # newest `keep` revisions (edits-keep .. edits-1).
+            edits = keep + 4
+            self.assertIn("# revision %d" % (edits - keep),
+                          (Path(tmp) / snapshots[0]).read_text())
+            self.assertIn("# revision %d" % (edits - 1),
+                          (Path(tmp) / snapshots[-1]).read_text())
+
     def test_validate_accepts_a_complete_config(self) -> None:
         self.assertIsNone(validate_config_text(VENDOR))
         self.assertIsNone(validate_config_text('server.port = 80\n'))

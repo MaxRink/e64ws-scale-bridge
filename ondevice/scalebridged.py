@@ -39,6 +39,12 @@ DEFAULT_STATE = "/run/scale-bridge/state.json"
 DEFAULT_SHOTS = "/db/scale-bridge/shots.jsonl"
 DEFAULT_CONFIG = "/db/scale-bridge/config.json"
 SCHEMA = 1
+# /db survives signed updates, so the shot history grows for the life of the
+# unit: one JSON line per shot is ~230 bytes, or ~12.7 MB/year at four shots a
+# day.  Rotate at 4 MiB and keep one previous file, so the log is bounded at
+# ~8 MiB and the newest shots are always the ones on disk.
+SHOTS_MAX_BYTES = 4 << 20
+SHOTS_KEEP = 1
 
 
 def now_ms() -> int:
@@ -278,11 +284,28 @@ class ScaleDaemon:
             self._state.update(fields)
         self._write_state()
 
+    def _rotate_shots(self) -> None:
+        """Keep the shot log bounded: shots.jsonl -> .1, oldest discarded."""
+
+        if self.shots_path is None:
+            return
+        try:
+            if self.shots_path.stat().st_size < SHOTS_MAX_BYTES:
+                return
+        except OSError:
+            return
+        for index in range(SHOTS_KEEP, 0, -1):
+            source = self.shots_path if index == 1 else Path(f"{self.shots_path}.{index - 1}")
+            if source.exists():
+                os.replace(source, Path(f"{self.shots_path}.{index}"))
+        self.log(f"rotated {self.shots_path} at {SHOTS_MAX_BYTES} bytes")
+
     def _append_shot(self, shot: dict[str, Any]) -> None:
         if self.shots_path is None:
             return
         try:
             self.shots_path.parent.mkdir(parents=True, exist_ok=True)
+            self._rotate_shots()
             with open(self.shots_path, "a", encoding="utf-8") as handle:
                 handle.write(json.dumps(shot, separators=(",", ":"), sort_keys=True) + "\n")
         except OSError as exc:

@@ -84,6 +84,36 @@ def docker_available() -> bool:
         return False
 
 
+INIT_SCRIPT = textwrap.dedent("""
+    set -eu
+    mkdir -p /log /run/scale-bridge /storage/scale-bridge/ondevice /db/scale-bridge
+    cp /src/ondevice/scalebridged.py /storage/scale-bridge/ondevice/scalebridged.py
+    # start-stop-daemon is a stub: the subject here is the log cap, not the
+    # vendor's supervisor.
+    for path in /sbin/start-stop-daemon /usr/sbin/start-stop-daemon /bin/start-stop-daemon; do
+        mkdir -p "$(dirname "$path")"
+        printf '#!/bin/sh\nexit 0\n' > "$path"
+        chmod +x "$path"
+    done
+    # 2 MiB of old log, well over the 1 MiB cap.
+    dd if=/dev/zero bs=1024 count=2048 2>/dev/null | tr '\\0' 'x' > /log/scalebridged.log
+    before=$(wc -c < /log/scalebridged.log)
+    sh /src/ondevice/S95scalebridge start >/dev/null 2>&1 || true
+    echo "before=$before"
+    if [ -f /log/scalebridged.log.1 ]; then
+      echo "rotated=$(wc -c < /log/scalebridged.log.1)"
+    else
+      echo "rotated=missing"
+    fi
+    [ -f /log/scalebridged.log ] && echo "fresh=$(wc -c < /log/scalebridged.log)" || echo "fresh=missing"
+    # A small log must not be rotated again.
+    rm -f /log/scalebridged.log.1
+    : > /log/scalebridged.log
+    sh /src/ondevice/S95scalebridge start >/dev/null 2>&1 || true
+    [ -f /log/scalebridged.log.1 ] && echo "small-rotated=yes" || echo "small-rotated=no"
+""")
+
+
 class UninstallShellTests(unittest.TestCase):
     def setUp(self) -> None:
         if not docker_available():
@@ -182,6 +212,25 @@ set -e
         self.assertEqual(self._probe("lighttpd-test-ran"), "yes")
         # lighttpd was restarted only after the config validated.
         self.assertIn("restart", self._probe("init"))
+
+    def test_the_init_script_caps_the_daemon_log(self) -> None:
+        # The daemon is started with >>, so the log only grows; /log is on the
+        # rootfs of an embedded unit.
+        result = subprocess.run(
+            ["docker", "run", "--rm", "-v", f"{REPO}:/src:ro",
+             IMAGE, "sh", "-c", INIT_SCRIPT],
+            capture_output=True, text=True, timeout=300, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        values = dict(
+            line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+        )
+        self.assertEqual(values.get("before"), str(2 * 1024 * 1024))
+        self.assertEqual(values.get("rotated"), str(2 * 1024 * 1024))
+        # A fresh log file exists (the stub's >> creates it) and is not the old
+        # 2 MiB.
+        self.assertIn(values.get("fresh"), {"0", "missing"})
+        self.assertEqual(values.get("small-rotated"), "no")
 
     def test_an_unpatched_config_is_left_alone(self) -> None:
         # Nothing to restore: no backup is needed and nothing is reported.

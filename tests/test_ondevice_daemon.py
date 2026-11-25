@@ -409,6 +409,44 @@ class OnDeviceDaemonTests(unittest.TestCase):
         self.assertTrue(state["error"], "the drop must be recorded as an error")
         self.assertFalse(daemon.detector.active)
 
+    def test_the_shot_log_rotates_instead_of_growing_forever(self) -> None:
+        # /db survives signed updates, so shots.jsonl grows for the life of the
+        # unit (~12.7 MB/year at four shots a day) with nothing to bound it.
+        shot = {"mass_g": 18.0, "duration_ms": 24600.0, "valid": True,
+                "reason": "stable", "at_ms": 1}
+        with tempfile.TemporaryDirectory() as tmp:
+            shots_path = Path(tmp) / "shots.jsonl"
+            daemon = ScaleDaemon(
+                "ws://127.0.0.1:1/snapshot",
+                state_path=str(Path(tmp) / "state.json"),
+                shots_path=str(shots_path),
+            )
+            # The documented cap, as a value: this test fails on the behaviour
+            # (a log that keeps growing) rather than on a missing constant.
+            # Pretend the log already reached it -- 4 MiB of real writes would
+            # only slow the test down.
+            cap = 4 << 20
+            shots_path.write_text("x" * (cap + 1))
+            daemon._append_shot(dict(shot))
+            self.assertTrue(Path(f"{shots_path}.1").is_file(),
+                            "the full log must move aside, not grow")
+            self.assertEqual(Path(f"{shots_path}.1").stat().st_size, cap + 1)
+            self.assertEqual(len(shots_path.read_text().splitlines()), 1)
+            self.assertAlmostEqual(json.loads(shots_path.read_text())["mass_g"], 18.0)
+
+    def test_a_small_shot_log_is_not_rotated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            shots_path = Path(tmp) / "shots.jsonl"
+            daemon = ScaleDaemon(
+                "ws://127.0.0.1:1/snapshot",
+                state_path=str(Path(tmp) / "state.json"),
+                shots_path=str(shots_path),
+            )
+            daemon._append_shot({"mass_g": 18.0})
+            daemon._append_shot({"mass_g": 19.0})
+            self.assertFalse(Path(f"{shots_path}.1").exists())
+            self.assertEqual(len(shots_path.read_text().splitlines()), 2)
+
     def test_non_monotonic_scale_clock_resets_detector(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             daemon = ScaleDaemon(

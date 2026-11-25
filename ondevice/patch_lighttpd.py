@@ -162,6 +162,30 @@ def validate_config_text(text: str) -> str | None:
     return None
 
 
+# One snapshot per edit, never pruned, is a slow leak on a device whose /db is
+# small: keep the newest few for rollback evidence.
+SNAPSHOT_KEEP = 5
+
+
+def prune_snapshots(backup: Path, *, keep: int = SNAPSHOT_KEEP,
+                    protect: Path | None = None) -> None:
+    """Keep the newest *keep* snapshots next to *backup*; drop the rest."""
+
+    if keep <= 0:
+        return
+    # *protect* is the snapshot just written and counts towards the budget.
+    room = keep - 1 if protect is not None else keep
+    snapshots = sorted(
+        item for item in backup.parent.glob(backup.name + ".*")
+        if not item.name.endswith(".tmp") and item != protect
+    )
+    for stale in (snapshots[:-room] if room else snapshots):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+
+
 def _describe_snapshots(backup: Path) -> str:
     """Name the sibling snapshots that do look complete, for the operator."""
 
@@ -193,6 +217,7 @@ def snapshot(config: Path, backup: Path) -> Path:
         candidate = backup.with_name(f"{base}.{index}")
         index += 1
     _atomic_copy(config, candidate)
+    prune_snapshots(backup, protect=candidate)
     print(f"snapshotted pre-edit config to {candidate}")
     return candidate
 
