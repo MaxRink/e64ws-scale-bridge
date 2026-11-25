@@ -69,6 +69,11 @@ a failed send still leaves the audit line on stdout. With `--apply` the
 grinder's response is printed afterwards as a second document (`--json`) or as
 the `grinder:` line.
 
+The client carries the token in the WSS URL query string, so every error and
+log line is redacted (`token=<redacted>`, and any `Authorization` value) before
+it is printed, and the exception chain is cut so the unredacted text cannot
+resurface in a traceback.
+
 Read-only preflight before a write path:
 
 ```sh

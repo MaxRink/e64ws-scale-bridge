@@ -17,6 +17,7 @@ from tools.e64ws_client import (
     login_error_message,
     main as client_main,
     no_password_payload,
+    redact,
     run_request,
 )
 from tools.scale_bridge import _token_for
@@ -73,6 +74,74 @@ class _FakeWebSocketModule(types.ModuleType):
         if isinstance(item, BaseException):
             raise item
         return item
+
+
+class RedactionTests(unittest.TestCase):
+    """The WSS token goes in the query string and must never be printed."""
+
+    TOKEN = "s3cr3t-token-value"
+    URL = f"wss://192.0.2.1:9997/?token={TOKEN}"
+
+    def _request(self, fake: _FakeWebSocketModule) -> dict:
+        with mock.patch.dict(sys.modules, {"websocket": fake}):
+            return run_request(
+                "192.0.2.1", self.TOKEN, dict(REQUEST),
+                insecure=True, ca_file=None, timeout=0.2,
+            )
+
+    def test_redact_removes_query_and_bearer_values(self) -> None:
+        text = f"{self.URL} Authorization: Bearer abc123"
+        cleaned = redact(text, self.TOKEN)
+        self.assertNotIn(self.TOKEN, cleaned)
+        self.assertNotIn("abc123", cleaned)
+        self.assertIn("<redacted>", cleaned)
+        # The query-string form is removed even without the explicit secret.
+        self.assertNotIn(self.TOKEN, redact(text))
+
+    def test_connect_failure_never_echoes_the_token(self) -> None:
+        fake = _FakeWebSocketModule([OSError(f"handshake failed for {self.URL}")])
+        with self.assertRaises(RuntimeError) as caught:
+            self._request(fake)
+        self.assertNotIn(self.TOKEN, str(caught.exception))
+        self.assertIn("<redacted>", str(caught.exception))
+        # No chained exception may carry the unredacted text either.
+        self.assertIsNone(caught.exception.__cause__)
+
+    def test_receive_failure_never_echoes_the_token(self) -> None:
+        fake = _FakeWebSocketModule([])
+        fake.sockets = [
+            _FakeSocket(error=fake.WebSocketException(f"socket error on {self.URL}"))
+        ]
+        with self.assertRaises(RuntimeError) as caught:
+            self._request(fake)
+        self.assertNotIn(self.TOKEN, str(caught.exception))
+
+    def test_timeout_message_never_echoes_the_token(self) -> None:
+        fake = _FakeWebSocketModule([])
+        fake.sockets = [_FakeSocket(error=fake.WebSocketTimeoutException("timed out"))]
+        with self.assertRaises(RuntimeError) as caught:
+            self._request(fake)
+        self.assertNotIn(self.TOKEN, str(caught.exception))
+
+    def test_cli_error_output_never_contains_the_token(self) -> None:
+        fake = _FakeWebSocketModule([OSError(f"handshake failed for {self.URL}")])
+        output = io.StringIO()
+        with mock.patch.dict(sys.modules, {"websocket": fake}), \
+                contextlib.redirect_stderr(output):
+            code = client_main([
+                "--host", "192.0.2.1", "--token", self.TOKEN,
+                "--request", "RequestDriverState", "--insecure", "--timeout", "0.2",
+            ])
+        self.assertEqual(code, 2)
+        self.assertNotIn(self.TOKEN, output.getvalue())
+        self.assertIn("<redacted>", output.getvalue())
+
+    def test_the_query_string_still_carries_the_token(self) -> None:
+        fake = _FakeWebSocketModule([])
+        good = _FakeSocket(frames=(json.dumps(RESPONSE),))
+        fake.sockets = [good]
+        self._request(fake)
+        self.assertEqual(fake.urls, [self.URL])
 
 
 class ReceiveTimeoutTests(unittest.TestCase):
