@@ -131,6 +131,9 @@ python3 tools/scale_bridge.py --replay examples/shot.jsonl --once --json
 - No event printed: the sample rate is too low or the baseline never settled.
 - Event is `validity: false`: the detected duration is under 15 s.
 - `server closed the connection` on stock: expected; `AddBrewEvent` is dev-only.
+- `the grinder refused AddBrewEvent: ...` (exit 3): the event was sent and the
+  grinder declined it; the reason is on stderr. Exit 2 means it was never
+  delivered. Stock firmware refuses `AddBrewEvent` (dev gated).
 - `no WSS response from <host> within N s` (exit 2): the socket went silent for
   the whole `--timeout` budget. The client closes it and exits 2 instead of
   raising a traceback; run the command again to reconnect.

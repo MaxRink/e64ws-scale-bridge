@@ -73,6 +73,40 @@ def _e64_client():
         from e64ws_client import login, login_no_password, run_request
     return login, login_no_password, run_request
 
+
+def _redact(value: object, token: str) -> str:
+    """Redact through the WSS client's one implementation (lazily imported)."""
+
+    try:
+        from tools.e64ws_client import redact
+    except ModuleNotFoundError:  # pragma: no cover - direct script execution
+        from e64ws_client import redact
+    return redact(value, token)
+
+
+REJECTED_EXIT = 3
+
+
+def rejection_reason(response: Mapping[str, Any]) -> str:
+    """Return the grinder's reason when it refused the action, else ``""``.
+
+    An accepted action answers ``{"success": true}``.  An explicit
+    ``success: false`` is a *refusal* -- not a transport error -- and it used
+    to be indistinguishable from acceptance: the CLI exited 0, so automation
+    and the audit line could not tell "sent and refused" from "sent and
+    accepted".  Only an explicit ``false`` counts, so a payload that simply
+    does not carry the field keeps the old behaviour.
+    """
+
+    if not isinstance(response, Mapping) or response.get("success") is not False:
+        return ""
+    for key in ("error", "message", "reason", "detail"):
+        value = response.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return "the grinder gave no reason"
+
+
 DECENT_SERVICE = "0000fff0-0000-1000-8000-00805f9b34fb"
 DECENT_NOTIFY = "0000fff4-0000-1000-8000-00805f9b34fb"
 DECENT_WRITE = "000036f5-0000-1000-8000-00805f9b34fb"
@@ -603,6 +637,13 @@ def _run(args: argparse.Namespace) -> int:
                 wss_port=args.wss_port,
             )
             _print_response(response, as_json=args.json)
+            refused = rejection_reason(response)
+            if refused:
+                # Loud on stderr, and non-zero: a rejected action must not look
+                # like a delivered one to a script or to the operator.
+                print(f"scale-bridge: the grinder refused AddBrewEvent: "
+                      f"{_redact(refused, token)}", file=sys.stderr)
+                return REJECTED_EXIT
         if args.once:
             return 0
     return 0

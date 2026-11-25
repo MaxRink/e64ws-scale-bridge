@@ -364,6 +364,75 @@ class ApplyAuditTests(unittest.TestCase):
             self.assertEqual(documents[1], {"response": {"success": True}})
 
 
+class RejectedActionTests(unittest.TestCase):
+    """A refusal by the grinder must not look like a delivered event."""
+
+    TOKEN = "s3cr3t-token-value"
+    # The documented exit status for "sent and refused", pinned here on
+    # purpose: it is a contract with the operator's scripts, not an internal
+    # constant of this file.
+    REFUSED_EXIT = 3
+
+    def _args(self, replay: str) -> list[str]:
+        return [
+            "--replay", replay, "--grinder", "192.0.2.1", "--token", self.TOKEN,
+            "--apply", "--yes", "--once",
+            "--baseline-samples", "2", "--min-duration-ms", "400",
+            "--valid-min-ms", "400", "--stable-ms", "200",
+        ]
+
+    def _run(self, response: dict) -> tuple[int, str, str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "shot.jsonl")
+            with open(path, "w", encoding="utf-8") as handle:
+                for grams, ms in ApplyAuditTests.POINTS:
+                    handle.write(json.dumps({"grams": grams, "ms": float(ms)}) + "\n")
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with mock.patch("tools.scale_bridge.send_add_brew_event",
+                            return_value=response), \
+                    contextlib.redirect_stdout(stdout), \
+                    contextlib.redirect_stderr(stderr):
+                code = main(self._args(path))
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_refused_add_brew_event_exits_non_zero_and_says_why(self) -> None:
+        code, stdout, stderr = self._run(
+            {"success": False, "error": "AddBrewEvent not permitted (dev gated)"}
+        )
+        self.assertNotEqual(code, 0)
+        self.assertEqual(code, self.REFUSED_EXIT)
+        self.assertIn("AddBrewEvent not permitted (dev gated)", stderr)
+        self.assertIn("refused AddBrewEvent", stderr)
+        # The audit record is still printed before the refusal is reported.
+        self.assertIn("brewWeightMg", stdout)
+
+    def test_accepted_add_brew_event_still_exits_zero(self) -> None:
+        code, _, stderr = self._run({"success": True})
+        self.assertEqual(code, 0)
+        self.assertNotIn("refused", stderr)
+
+    def test_a_refusal_without_a_reason_still_fails_loudly(self) -> None:
+        code, _, stderr = self._run({"success": False})
+        self.assertEqual(code, self.REFUSED_EXIT)
+        self.assertIn("no reason", stderr)
+
+    def test_a_response_without_success_keeps_the_old_behaviour(self) -> None:
+        # Only an explicit success:false is a refusal; an older payload that
+        # does not carry the field must not start failing.
+        code, _, stderr = self._run({"type": "GrinderActionResult", "refId": 1})
+        self.assertEqual(code, 0)
+        self.assertNotIn("refused", stderr)
+
+    def test_the_refusal_reason_is_redacted(self) -> None:
+        code, stdout, stderr = self._run({
+            "success": False,
+            "error": f"denied while talking to wss://192.0.2.1:9997/?token={self.TOKEN}",
+        })
+        self.assertEqual(code, self.REFUSED_EXIT)
+        self.assertNotIn(self.TOKEN, stderr)
+        self.assertIn("<redacted>", stderr)
+
+
 class CliPreflightTests(unittest.TestCase):
     def test_preflight_accepts_password_file(self) -> None:
         args = build_parser().parse_args([
