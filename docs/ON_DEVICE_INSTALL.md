@@ -301,12 +301,16 @@ image.
 Off-device:
 
 ```sh
-# daemon + existing bridge tests (138 tests; the 15 PHP-endpoint tests skip
-# as a group when php is not on PATH, so such a run reports "Ran 107")
+# daemon + bridge + uninstall tests (142 tests; the 15 PHP-endpoint tests skip
+# as a group when php is not on PATH, and the 4 uninstall tests skip without
+# Docker)
 python3 -m unittest discover -s tests -v
 
 # PHP 8.4 endpoints/page/ESP32 ingest, in Docker
 ./tools/run_php_tests.sh
+
+# ondevice/uninstall.sh, against a throwaway root filesystem in Docker
+python3 -m unittest tests.test_ondevice_shell -v
 ```
 
 The daemon test uses a fake RFC 6455 scale and a real shot sequence: five idle

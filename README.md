@@ -145,13 +145,15 @@ the assisted dial-in plugin is
 python3 -m unittest discover -s tests -v
 ```
 
-138 Python tests cover the Decent/generic parsers, shot detection, event units,
+142 Python tests cover the Decent/generic parsers, shot detection, event units,
 the WSS client's timeout/redaction paths, the Xenia emulator routes, the
 on-device daemon, the lighttpd snapshot/restore patch and these docs. Fifteen
 of them exercise the on-device Xenia endpoints, WebUI page, ESP32 ingest and
-state freshness; they skip as a group when `php` is not on `PATH` (such a run
-reports "Ran 123") and `./tools/run_php_tests.sh` runs the same fifteen against
-PHP 8.4 in Docker. The bridge was also exercised against the QEMU E64: an
+state freshness; they skip as a group when `php` is not on `PATH`. Four more
+drive `ondevice/uninstall.sh` for real inside a container and skip when Docker
+is unavailable. `./tools/run_php_tests.sh` runs the same fifteen against PHP
+8.4 in Docker and `python3 -m unittest tests.test_ondevice_shell` runs the
+uninstall suite. The bridge was also exercised against the QEMU E64: an
 18 g / 24.6 s replay produced `brewTimeMs=24600`, `brewWeightMg=18000`,
 `validity=true`, and `AddBrewEvent` returned `{"success": true}` in development
 mode.
