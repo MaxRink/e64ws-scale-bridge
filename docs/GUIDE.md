@@ -115,6 +115,9 @@ python3 tools/scale_bridge.py --replay examples/shot.jsonl --once --json
 - No event printed: the sample rate is too low or the baseline never settled.
 - Event is `validity: false`: the detected duration is under 15 s.
 - `server closed the connection` on stock: expected; `AddBrewEvent` is dev-only.
+- `no WSS response from <host> within N s` (exit 2): the socket went silent for
+  the whole `--timeout` budget. The client closes it and exits 2 instead of
+  raising a traceback; run the command again to reconnect.
 - TLS error: the vendor certificate is self-signed; use `--insecure` only on a
   trusted local network, or provide `--ca-file`.
 - BLE import error: install `bleak`; BLE is not needed for replay or Wi-Fi.

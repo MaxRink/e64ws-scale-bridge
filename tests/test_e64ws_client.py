@@ -1,13 +1,129 @@
 """Tests for the local E64 WSS client's login diagnostics."""
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import os
+import sys
 import tempfile
+import types
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
-from tools.e64ws_client import _vendor_hash, login_error_message, no_password_payload
+from tools.e64ws_client import (
+    _vendor_hash,
+    login_error_message,
+    main as client_main,
+    no_password_payload,
+    run_request,
+)
 from tools.scale_bridge import _token_for
+
+
+REQUEST = {"type": "RequestDriverState", "msgId": 1, "data": {}}
+RESPONSE = {"type": "RequestDriverStateResult", "refId": 1, "data": {"ddValueDum": 1}}
+
+
+class _FakeSocket:
+    def __init__(self, frames: tuple[str, ...] = (), error: BaseException | None = None) -> None:
+        self.frames = list(frames)
+        self.error = error
+        self.sent: list[str] = []
+        self.closed = 0
+
+    def send(self, payload: str) -> None:
+        self.sent.append(payload)
+
+    def recv(self) -> str:
+        if self.error is not None:
+            raise self.error
+        return self.frames.pop(0)
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+class _FakeWebSocketModule(types.ModuleType):
+    """Just enough of ``websocket-client`` to drive ``run_request``."""
+
+    def __init__(self, sockets: list[object]) -> None:
+        super().__init__("websocket")
+
+        class WebSocketException(Exception):
+            pass
+
+        class WebSocketTimeoutException(WebSocketException):
+            pass
+
+        class WebSocketConnectionClosedException(WebSocketException):
+            pass
+
+        self.WebSocketException = WebSocketException
+        self.WebSocketTimeoutException = WebSocketTimeoutException
+        self.WebSocketConnectionClosedException = WebSocketConnectionClosedException
+        self.sockets = list(sockets)
+        self.urls: list[str] = []
+
+    def create_connection(self, url: str, timeout: float | None = None,
+                          sslopt: dict | None = None) -> object:
+        self.urls.append(url)
+        item = self.sockets.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+
+class ReceiveTimeoutTests(unittest.TestCase):
+    """A silent socket must end in a message and exit 2, not a traceback."""
+
+    TOKEN = "s3cr3t-token-value"
+
+    def _request(self, fake: _FakeWebSocketModule) -> dict:
+        with mock.patch.dict(sys.modules, {"websocket": fake}):
+            return run_request(
+                "192.0.2.1", self.TOKEN, dict(REQUEST),
+                insecure=True, ca_file=None, timeout=0.2,
+            )
+
+    def test_recv_timeout_becomes_a_bounded_error(self) -> None:
+        fake = _FakeWebSocketModule([])
+        sock = _FakeSocket(error=fake.WebSocketTimeoutException("timed out"))
+        fake.sockets = [sock]
+        with self.assertRaises(RuntimeError) as caught:
+            self._request(fake)
+        self.assertIn("no WSS response", str(caught.exception))
+        self.assertEqual(sock.closed, 1)
+
+    def test_cli_exits_2_with_a_message_instead_of_a_traceback(self) -> None:
+        fake = _FakeWebSocketModule([])
+        sock = _FakeSocket(error=fake.WebSocketTimeoutException("timed out"))
+        fake.sockets = [sock]
+        output = io.StringIO()
+        with mock.patch.dict(sys.modules, {"websocket": fake}), \
+                contextlib.redirect_stderr(output):
+            code = client_main([
+                "--host", "192.0.2.1", "--token", self.TOKEN,
+                "--request", "RequestDriverState", "--insecure", "--timeout", "0.2",
+            ])
+        self.assertEqual(code, 2)
+        text = output.getvalue()
+        self.assertIn("e64ws-client:", text)
+        self.assertNotIn("Traceback", text)
+
+    def test_the_next_attempt_reconnects_and_succeeds(self) -> None:
+        fake = _FakeWebSocketModule([])
+        stale = _FakeSocket(error=fake.WebSocketTimeoutException("timed out"))
+        good = _FakeSocket(frames=(json.dumps(RESPONSE),))
+        fake.sockets = [stale, good]
+        with self.assertRaises(RuntimeError):
+            self._request(fake)
+        response = self._request(fake)
+        self.assertEqual(response["type"], "RequestDriverStateResult")
+        self.assertEqual(stale.closed, 1)
+        self.assertEqual(good.closed, 1)
+        self.assertEqual(len(fake.urls), 2)
 
 
 class LoginErrorMessageTests(unittest.TestCase):

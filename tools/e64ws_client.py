@@ -18,6 +18,7 @@ import json
 import secrets
 import ssl
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -173,11 +174,32 @@ def run_request(
         sslopt.update(cert_reqs=ssl.CERT_REQUIRED, ca_certs=ca_file)
     else:
         sslopt.update(cert_reqs=ssl.CERT_REQUIRED, check_hostname=True)
-    socket = websocket.create_connection(url, timeout=timeout, sslopt=sslopt)
+    try:
+        socket = websocket.create_connection(url, timeout=timeout, sslopt=sslopt)
+    except Exception as exc:  # noqa: BLE001 - websocket-client raises many types
+        raise RuntimeError(f"could not open the local WSS connection: {exc}") from None
     try:
         socket.send(json.dumps(message, separators=(",", ":")))
+        # The per-recv timeout alone bounds only a single read: a silent or
+        # chatty peer could keep the loop alive forever.  Bound the whole wait
+        # and turn a timeout into a message the CLI can report as exit 2.
+        deadline = time.monotonic() + timeout
         while True:
-            response = json.loads(socket.recv())
+            try:
+                raw = socket.recv()
+            except websocket.WebSocketTimeoutException as exc:
+                raise RuntimeError(
+                    f"no WSS response from {host} within {timeout:g} s; "
+                    "the connection was closed, re-run to reconnect"
+                ) from exc
+            except websocket.WebSocketException as exc:
+                raise RuntimeError(f"WSS connection failed: {exc}") from exc
+            if time.monotonic() > deadline:
+                raise RuntimeError(
+                    f"no matching WSS response from {host} within {timeout:g} s; "
+                    "the connection was closed, re-run to reconnect"
+                )
+            response = json.loads(raw)
             if E64WSProtocol.matches_response(message, response):
                 return response
             if response == {"pong": True}:
@@ -263,15 +285,19 @@ def main(argv: list[str] | None = None) -> int:
         message = protocol.request(args.request, data)
     else:
         message = protocol.action(args.action, data, action_type=args.action_type)
-    response = run_request(
-        args.host,
-        token,
-        message,
-        insecure=args.insecure,
-        ca_file=args.ca_file,
-        timeout=args.timeout,
-        allow_hazardous=args.allow_hazardous,
-    )
+    try:
+        response = run_request(
+            args.host,
+            token,
+            message,
+            insecure=args.insecure,
+            ca_file=args.ca_file,
+            timeout=args.timeout,
+            allow_hazardous=args.allow_hazardous,
+        )
+    except (RuntimeError, ValueError, OSError) as exc:
+        print(f"e64ws-client: {exc}", file=sys.stderr)
+        return 2
     json.dump(response, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")
     return 0
