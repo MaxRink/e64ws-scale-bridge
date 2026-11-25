@@ -84,6 +84,81 @@ def docker_available() -> bool:
         return False
 
 
+INSTALL_SCRIPT = textwrap.dedent("""
+    set -eu
+    mkdir -p /usr/local/www /etc/init.d /storage /db /run /log
+    set +e
+    sh /src/ondevice/install.sh --no-lighttpd > /tmp/first.log 2>&1
+    echo "first=$?"
+    set -e
+    cfg=/db/scale-bridge/config.json
+    [ -f "$cfg" ] && echo "config=present" || echo "config=missing"
+    echo "mode=$(stat -c %a "$cfg" 2>/dev/null || echo none)"
+    python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$cfg" 2>/dev/null \
+        && echo "valid=yes" || echo "valid=no"
+    [ -e "$cfg.new" ] && echo "leftover=yes" || echo "leftover=no"
+    set +e
+    sh /src/ondevice/install.sh --no-lighttpd > /tmp/second.log 2>&1
+    echo "second=$?"
+    grep -q 'Keeping existing' /tmp/second.log && echo "kept=yes" || echo "kept=no"
+    # A crash during the write leaves a truncated config. The installer used to
+    # keep it forever and never say anything was wrong.
+    printf '{"host": "hds.local", "ingest_tok' > "$cfg"
+    sh /src/ondevice/install.sh --no-lighttpd > /tmp/third.log 2>&1
+    echo "third=$?"
+    grep -q 'not valid JSON' /tmp/third.log && echo "loud=yes" || echo "loud=no"
+    set -e
+""")
+
+
+class InstallerShellTests(unittest.TestCase):
+    def setUp(self) -> None:
+        if not docker_available():
+            self.skipTest("docker is not available; run tools/run_shell_tests.sh")
+
+    def _run(self, script: str) -> dict:
+        result = subprocess.run(
+            ["docker", "run", "--rm", "-v", f"{REPO}:/src:ro",
+             IMAGE, "sh", "-c", script],
+            capture_output=True, text=True, timeout=300, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return dict(
+            line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+        )
+
+    def test_the_default_config_is_written_atomically_and_kept_valid(self) -> None:
+        values = self._run(INSTALL_SCRIPT)
+        self.assertEqual(values.get("first"), "0")
+        self.assertEqual(values.get("config"), "present")
+        # 0640 from the moment it exists: the ingest token lives in this file.
+        self.assertEqual(values.get("mode"), "640")
+        self.assertEqual(values.get("valid"), "yes")
+        self.assertEqual(values.get("leftover"), "no")
+        self.assertEqual(values.get("second"), "0")
+        self.assertEqual(values.get("kept"), "yes")
+        # A truncated config stops the installer instead of being kept forever.
+        self.assertEqual(values.get("third"), "1")
+        self.assertEqual(values.get("loud"), "yes")
+
+
+class InstallerSourceTests(unittest.TestCase):
+    """Source checks for the property a black-box run cannot observe."""
+
+    def test_the_installer_never_writes_the_config_in_place(self) -> None:
+        # `cat > config.json` leaves a truncated live config after a crash and
+        # creates the ingest token world-readable; the write must go to a
+        # sibling with a restrictive umask and be renamed into place.
+        text = (REPO / "ondevice" / "install.sh").read_text(encoding="utf-8")
+        # assertFalse, not assertNotIn: a failure should not dump the whole
+        # installer into the CI log.
+        self.assertFalse('cat > "$DB/config.json"' in text,
+                         "the installer writes the live config in place")
+        self.assertIn('cat > "$CONFIG_NEW"', text)
+        self.assertIn('mv -f "$CONFIG_NEW" "$DB/config.json"', text)
+        self.assertIn("umask 077", text)
+
+
 INIT_SCRIPT = textwrap.dedent("""
     set -eu
     mkdir -p /log /run/scale-bridge /storage/scale-bridge/ondevice /db/scale-bridge

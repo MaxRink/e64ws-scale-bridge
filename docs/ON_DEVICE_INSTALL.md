@@ -71,6 +71,14 @@ Default config:
 }
 ```
 
+The installer creates `config.json` only when it is absent: it writes
+`config.json.new` under `umask 077`, chmods that to `0640` and renames it, so a
+crash leaves either the old file or the complete new one, and the ingest token
+is never in a world-readable file even briefly. If an existing `config.json` is
+not valid JSON (a truncated write from an older installer) it stops with an
+error instead of printing "Keeping existing" over a file the daemon cannot
+load.
+
 `finishing_ms` is how long `/api/v2/mako` keeps returning
 `MA_STATUS=4`/`REAL_EXTRACTION_TIME_MS` after a shot. Tune it to the E64 poll
 interval if GBS misses the finishing state.
@@ -310,7 +318,7 @@ image.
 Off-device:
 
 ```sh
-# daemon + bridge + uninstall tests (150 tests; the 15 PHP-endpoint tests skip
+# daemon + bridge + uninstall tests (152 tests; the 15 PHP-endpoint tests skip
 # as a group when php is not on PATH, and the 4 uninstall tests skip without
 # Docker)
 python3 -m unittest discover -s tests -v

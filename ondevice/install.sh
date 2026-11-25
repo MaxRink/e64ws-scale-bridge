@@ -105,7 +105,12 @@ if [ ! -e "$DB/config.json" ]; then
         say "  + default config (host hds.local, port 80, /snapshot)"
     else
         TOKEN=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' || true)
-        cat > "$DB/config.json" <<EOF
+        # Write next to the target, chmod it there, then rename: a crash leaves
+        # either nothing or the complete file at $DB/config.json, and the
+        # ingest token is never in a world-readable file even for a moment
+        # (umask 077 creates it 0600, then it is narrowed to 0640).
+        CONFIG_NEW="$DB/config.json.new"
+        (umask 077; cat > "$CONFIG_NEW" <<EOF
 {
   "host": "hds.local",
   "port": 80,
@@ -116,10 +121,20 @@ if [ ! -e "$DB/config.json" ]; then
   "ingest_token": "$TOKEN"
 }
 EOF
-        chmod 0640 "$DB/config.json"
+        )
+        chmod 0640 "$CONFIG_NEW"
+        mv -f "$CONFIG_NEW" "$DB/config.json"
         chown www-data:www-data "$DB/config.json" 2>/dev/null || true
         say "ESP32 BLE ingest token written to $DB/config.json"
     fi
+elif [ "$DRY_RUN" = 0 ] && ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' \
+        "$DB/config.json" 2>/dev/null; then
+    # Keeping a truncated file forever is worse than stopping: the daemon
+    # would refuse to start and every re-run would say "Keeping existing".
+    say "error: $DB/config.json exists but is not valid JSON." >&2
+    say "  A crash or a full disk can truncate it. Repair or remove it, then re-run:" >&2
+    say "    rm $DB/config.json" >&2
+    exit 1
 else
     say "Keeping existing $DB/config.json"
 fi
