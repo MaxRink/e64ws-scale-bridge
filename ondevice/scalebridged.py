@@ -384,6 +384,29 @@ class ScaleDaemon:
                 self._state["connected"] = False
             self._write_state(force=True)
 
+    def _connection_lost(self, exc: BaseException) -> None:
+        """Reset to idle after a dropped stream.
+
+        A shot that was in flight is discarded, not reported: its samples are
+        incomplete and the scale clock may restart.  Resetting the detector
+        keeps the state file consistent with it (idle and nothing active)
+        instead of showing idle while a stale shot is still open.
+        """
+
+        self._reset_detector()
+        self._last_sample = None
+        self._flow_g_s = 0.0
+        with self._lock:
+            self._state["connected"] = False
+            self._state["error"] = str(exc)
+            self._state["phase"] = "idle"
+            self._state["ma_status"] = 1
+            self._state["extraction_status"] = 0
+            self._state["active_ms"] = 0
+            self._state["flow_g_s"] = 0.0
+        self._write_state(force=True)
+        self.log(f"connection error: {exc}")
+
     def run_forever(self) -> None:
         backoff = 1.0
         while not self.stop_event.is_set():
@@ -393,14 +416,7 @@ class ScaleDaemon:
             except (OSError, WebSocketError, OpenScaleProtocolError, ValueError) as exc:
                 if self.stop_event.is_set():
                     break
-                with self._lock:
-                    self._state["connected"] = False
-                    self._state["error"] = str(exc)
-                    self._state["phase"] = "idle"
-                    self._state["ma_status"] = 1
-                    self._state["extraction_status"] = 0
-                self._write_state(force=True)
-                self.log(f"connection error: {exc}")
+                self._connection_lost(exc)
                 self.stop_event.wait(backoff)
                 backoff = min(backoff * 2, 30.0)
 

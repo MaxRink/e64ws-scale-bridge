@@ -187,6 +187,32 @@ class OnDeviceDaemonTests(unittest.TestCase):
             self.assertEqual(daemon.detector.max_shot_ms, 7000.0)
             self.assertEqual(daemon.detector.stability_g, 0.2)
 
+    def test_dropout_discards_an_active_shot_and_rearms(self) -> None:
+        # A dropped stream must not leave the detector active while the state
+        # file says idle: the partial shot is discarded and the detector is
+        # re-armed for the next stream.
+        with tempfile.TemporaryDirectory() as tmp:
+            daemon = ScaleDaemon(
+                "ws://127.0.0.1:1/snapshot",
+                state_path=str(Path(tmp) / "state.json"),
+                shots_path=None,
+                detector=ShotDetector(baseline_samples=3, min_duration_ms=1000.0),
+            )
+            for ms in (0.0, 200.0, 400.0):
+                daemon.feed(0.0, ms)
+            daemon.feed(18.0, 600.0)
+            self.assertTrue(daemon.detector.active)
+            self.assertEqual(daemon.state()["phase"], "serving")
+            daemon._connection_lost(OSError("scale socket closed"))
+            state = daemon.state()
+            self.assertFalse(daemon.detector.active)
+            self.assertEqual(state["phase"], "idle")
+            self.assertEqual(state["ma_status"], 1)
+            self.assertEqual(state["extraction_status"], 0)
+            self.assertFalse(state["connected"])
+            self.assertIn("scale socket closed", state["error"])
+            self.assertEqual(state["shot_count"], 0)
+
     def test_non_monotonic_scale_clock_resets_detector(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             daemon = ScaleDaemon(
