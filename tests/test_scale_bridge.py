@@ -524,6 +524,42 @@ raise SystemExit(scale_bridge.main(sys.argv[2:]))
             self.assertNotIn("response", text)
 
 
+class TransportFailureTests(unittest.TestCase):
+    """A transport OSError is exit 2 with a redacted message, not a traceback."""
+
+    TOKEN = "s3cr3t-token-value"
+
+    def test_a_send_oserror_is_exit_2_and_hides_the_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "shot.jsonl")
+            with open(path, "w", encoding="utf-8") as handle:
+                for grams, ms in ApplyAuditTests.POINTS:
+                    handle.write(json.dumps({"grams": grams, "ms": float(ms)}) + "\n")
+            stdout, stderr = io.StringIO(), io.StringIO()
+
+            def boom(*_args: object, **_kwargs: object) -> dict:
+                raise OSError(
+                    f"send failed for wss://192.0.2.1:9997/?token={self.TOKEN}"
+                )
+
+            with mock.patch("tools.scale_bridge.send_add_brew_event", boom), \
+                    contextlib.redirect_stdout(stdout), \
+                    contextlib.redirect_stderr(stderr):
+                code = main([
+                    "--replay", path, "--grinder", "192.0.2.1",
+                    "--token", self.TOKEN, "--apply", "--yes", "--once",
+                    "--baseline-samples", "2", "--min-duration-ms", "400",
+                    "--valid-min-ms", "400", "--stable-ms", "200",
+                ])
+        self.assertEqual(code, 2)
+        message = stderr.getvalue()
+        self.assertIn("send failed", message)
+        self.assertNotIn(self.TOKEN, message)
+        self.assertIn("<redacted>", message)
+        # The audit record is still there: the event was printed before the send.
+        self.assertIn("brewWeightMg", stdout.getvalue())
+
+
 class CliPreflightTests(unittest.TestCase):
     def test_preflight_accepts_password_file(self) -> None:
         args = build_parser().parse_args([

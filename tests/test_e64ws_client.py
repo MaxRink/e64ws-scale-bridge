@@ -144,6 +144,112 @@ class RedactionTests(unittest.TestCase):
         self.assertEqual(fake.urls, [self.URL])
 
 
+class ResponsePayloadRedactionTests(unittest.TestCase):
+    """The peer's payload is printed too, so it is redacted too.
+
+    README promises that a token is never printed.  ``_print_response`` (and
+    this client's own dump of the reply) printed the grinder's text verbatim,
+    so a nested error that quoted the request leaked the token even though
+    every message *we* wrote was redacted.
+    """
+
+    TOKEN = "s3cr3t-token-value"
+    LEAKY = {"type": "RequestDriverStateResult", "refId": 1, "success": False,
+             "error": "denied for wss://192.0.2.1:9997/?token=" + TOKEN}
+
+    def test_cli_never_prints_the_token_from_the_payload(self) -> None:
+        fake = _FakeWebSocketModule([])
+        fake.sockets = [_FakeSocket(frames=(json.dumps(self.LEAKY),))]
+        output = io.StringIO()
+        with mock.patch.dict(sys.modules, {"websocket": fake}), \
+                contextlib.redirect_stdout(output):
+            code = client_main([
+                "--host", "192.0.2.1", "--token", self.TOKEN,
+                "--request", "RequestDriverState", "--insecure", "--timeout", "0.2",
+            ])
+        self.assertEqual(code, 0)
+        text = output.getvalue()
+        self.assertNotIn(self.TOKEN, text)
+        self.assertIn("<redacted>", text)
+        # The payload is still machine-readable for a caller that pipes it.
+        self.assertEqual(json.loads(text)["success"], False)
+
+    def test_send_failure_never_echoes_the_token(self) -> None:
+        fake = _FakeWebSocketModule([])
+        token = self.TOKEN
+
+        class _FailingSend(_FakeSocket):
+            def send(self, payload: str) -> None:
+                raise OSError(f"send failed for wss://192.0.2.1:9997/?token={token}")
+
+        fake.sockets = [_FailingSend()]
+        with mock.patch.dict(sys.modules, {"websocket": fake}):
+            with self.assertRaises(RuntimeError) as caught:
+                run_request(
+                    "192.0.2.1", self.TOKEN, dict(REQUEST),
+                    insecure=True, ca_file=None, timeout=0.2,
+                )
+        self.assertNotIn(self.TOKEN, str(caught.exception))
+        self.assertIn("<redacted>", str(caught.exception))
+        self.assertIn("could not send", str(caught.exception))
+        self.assertIsNone(caught.exception.__cause__)
+
+    def test_cli_send_failure_is_exit_2_without_a_traceback(self) -> None:
+        fake = _FakeWebSocketModule([])
+        token = self.TOKEN
+
+        class _FailingSend(_FakeSocket):
+            def send(self, payload: str) -> None:
+                raise OSError(f"reset while sending to ?token={token}")
+
+        fake.sockets = [_FailingSend()]
+        output = io.StringIO()
+        with mock.patch.dict(sys.modules, {"websocket": fake}), \
+                contextlib.redirect_stderr(output):
+            code = client_main([
+                "--host", "192.0.2.1", "--token", self.TOKEN,
+                "--request", "RequestDriverState", "--insecure", "--timeout", "0.2",
+            ])
+        self.assertEqual(code, 2)
+        self.assertNotIn("Traceback", output.getvalue())
+        self.assertNotIn(self.TOKEN, output.getvalue())
+
+
+class BridgeResponseRedactionTests(unittest.TestCase):
+    """The bridge's ``grinder: {...}`` line is the same leak one layer up."""
+
+    TOKEN = "s3cr3t-token-value"
+
+    def test_the_printed_response_hides_the_token(self) -> None:
+        from tools.scale_bridge import _print_response
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            _print_response(
+                {"success": False,
+                 "error": f"refused for /?token={self.TOKEN}"},
+                as_json=False,
+                token=self.TOKEN,
+            )
+        text = output.getvalue()
+        self.assertNotIn(self.TOKEN, text)
+        self.assertIn("<redacted>", text)
+
+    def test_the_json_response_document_stays_valid_and_redacted(self) -> None:
+        from tools.scale_bridge import _print_response
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            _print_response(
+                {"success": False, "error": f"refused for /?token={self.TOKEN}"},
+                as_json=True,
+                token=self.TOKEN,
+            )
+        document = json.loads(output.getvalue())
+        self.assertEqual(document["response"]["success"], False)
+        self.assertNotIn(self.TOKEN, output.getvalue())
+
+
 class ReceiveTimeoutTests(unittest.TestCase):
     """A silent socket must end in a message and exit 2, not a traceback."""
 

@@ -69,9 +69,15 @@ a failed send still leaves the audit line on stdout. With `--apply` the
 grinder's response is printed afterwards as a second document (`--json`) or as
 the `grinder:` line.
 
-The client carries the token in the WSS URL query string, so every error and
-log line is redacted (`token=<redacted>`, and any `Authorization` value) before
-it is printed, and the exception chain is cut so the unredacted text cannot
+The client carries the token in the WSS URL query string, so the token comes
+back from outside the process. A refused handshake raises with the peer's
+headers and response body, and a grinder or proxy that echoes the Request-URI
+in a 403 body echoes `?token=...` with it. (websocket-client does not quote the
+URL itself on a failed handshake; the echo in the *body* is the real leak
+vector, which is why redaction cannot be limited to messages this tool writes.)
+Every message and the grinder's response payload are therefore redacted before
+they are printed -- the token literal, `token=` query values and `Bearer`
+values -- and the exception chain is cut so the unredacted text cannot
 resurface in a traceback.
 
 Read-only preflight before a write path:

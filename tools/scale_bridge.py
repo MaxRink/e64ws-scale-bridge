@@ -575,6 +575,26 @@ def _token_for(args: argparse.Namespace) -> str:
     )
 
 
+def _token_hint(args: argparse.Namespace) -> str:
+    """Best-effort secret for redacting a failure that reaches ``main()``.
+
+    ``_run`` knows the resolved token, but by the time an exception reaches
+    ``main`` that local is gone.  Use what the arguments already carry; the
+    ``token=``/``Bearer`` patterns inside :func:`redact` cover the rest.
+    """
+
+    token = getattr(args, "token", None)
+    if token:
+        return str(token)
+    path = getattr(args, "token_file", None)
+    if path:
+        try:
+            return Path(path).read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+    return ""
+
+
 def _run(args: argparse.Namespace) -> int:
     if args.preflight:
         token = _token_for(args)
@@ -636,7 +656,7 @@ def _run(args: argparse.Namespace) -> int:
                 timeout=args.timeout,
                 wss_port=args.wss_port,
             )
-            _print_response(response, as_json=args.json)
+            _print_response(response, as_json=args.json, token=token)
             refused = rejection_reason(response)
             if refused:
                 # Loud on stderr, and non-zero: a rejected action must not look
@@ -656,13 +676,21 @@ def _print_record(record: Mapping[str, Any], *, as_json: bool) -> None:
     sys.stdout.flush()
 
 
-def _print_response(response: Mapping[str, Any], *, as_json: bool) -> None:
-    """Emit the grinder's answer, after the event has been recorded."""
+def _print_response(response: Mapping[str, Any], *, as_json: bool,
+                    token: str = "") -> None:
+    """Emit the grinder's answer, after the event has been recorded.
+
+    The payload is the grinder's text, not ours: an error nested in it can
+    quote the request it refused, including a URI that carries ``?token=``.
+    Print the redacted form -- the README promise is that a token is never
+    printed, and "only our own messages" was exactly the gap.
+    """
 
     if as_json:
-        print(json.dumps({"response": response}, indent=2, sort_keys=True))
+        text = json.dumps({"response": response}, indent=2, sort_keys=True)
     else:
-        print(f"grinder: {json.dumps(response, sort_keys=True)}")
+        text = f"grinder: {json.dumps(response, sort_keys=True)}"
+    print(_redact(text, token))
     sys.stdout.flush()
 
 
@@ -737,8 +765,11 @@ def main(argv: list[str] | None = None) -> int:
         return _run(args)
     except KeyboardInterrupt:
         return 130
-    except (ValueError, RuntimeError, OpenScaleProtocolError) as exc:
-        print(f"scale-bridge: {exc}", file=sys.stderr)
+    except (ValueError, RuntimeError, OpenScaleProtocolError, OSError) as exc:
+        # OSError covers the transport and file paths that used to escape as a
+        # traceback; the text is redacted for the same reason every other
+        # message is.
+        print(f"scale-bridge: {_redact(exc, _token_hint(args))}", file=sys.stderr)
         return 2
 
 

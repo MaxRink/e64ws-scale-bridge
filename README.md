@@ -43,7 +43,8 @@ grinder's response afterwards. A failed send therefore still records the event
 it attempted. A response with `success: false` is a *refusal*: the reason is
 printed to stderr and the command exits 3, so a script can tell a refused event
 from a delivered one (exit 2 is a transport or configuration error). Tokens and
-passwords are never printed.
+passwords are never printed -- including inside the grinder's own response
+payload, which is redacted before it is printed.
 
 Read-only preflight (no scale source and no `AddBrewEvent`):
 
@@ -144,12 +145,12 @@ the assisted dial-in plugin is
 python3 -m unittest discover -s tests -v
 ```
 
-125 Python tests cover the Decent/generic parsers, shot detection, event units,
+131 Python tests cover the Decent/generic parsers, shot detection, event units,
 the WSS client's timeout/redaction paths, the Xenia emulator routes, the
 on-device daemon, the lighttpd snapshot/restore patch and these docs. Eleven of
 them exercise the on-device Xenia endpoints, WebUI page, ESP32 ingest and state
 freshness; they skip as a group when `php` is not on `PATH` (such a run reports
-"Ran 114") and `./tools/run_php_tests.sh` runs the same eleven against PHP 8.4 in
+"Ran 120") and `./tools/run_php_tests.sh` runs the same eleven against PHP 8.4 in
 Docker. The bridge was also exercised against the QEMU E64: an 18 g / 24.6 s
 replay produced `brewTimeMs=24600`, `brewWeightMg=18000`,
 `validity=true`, and `AddBrewEvent` returned `{"success": true}` in development
