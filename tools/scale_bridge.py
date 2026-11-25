@@ -573,8 +573,12 @@ def _run(args: argparse.Namespace) -> int:
             group_head=args.group_head,
         )
         record: dict[str, Any] = {"shot": shot.as_dict(), "event": event}
+        # Print and flush the event *before* the write.  A failing transport
+        # must not hide what was about to be sent: the event line is the audit
+        # record (docs/GUIDE.md documents "printed before it is sent").
+        _print_record(record, as_json=args.json)
         if args.apply:
-            record["response"] = send_add_brew_event(
+            response = send_add_brew_event(
                 args.grinder,
                 token,
                 event,
@@ -583,25 +587,38 @@ def _run(args: argparse.Namespace) -> int:
                 timeout=args.timeout,
                 wss_port=args.wss_port,
             )
-        print(json.dumps(record, indent=2, sort_keys=True) if args.json else _human(record))
-        sys.stdout.flush()
+            _print_response(response, as_json=args.json)
         if args.once:
             return 0
     return 0
 
 
+def _print_record(record: Mapping[str, Any], *, as_json: bool) -> None:
+    """Emit the shot/event audit record and flush it immediately."""
+
+    print(json.dumps(record, indent=2, sort_keys=True) if as_json else _human(record))
+    sys.stdout.flush()
+
+
+def _print_response(response: Mapping[str, Any], *, as_json: bool) -> None:
+    """Emit the grinder's answer, after the event has been recorded."""
+
+    if as_json:
+        print(json.dumps({"response": response}, indent=2, sort_keys=True))
+    else:
+        print(f"grinder: {json.dumps(response, sort_keys=True)}")
+    sys.stdout.flush()
+
+
 def _human(record: Mapping[str, Any]) -> str:
     shot = record["shot"]
     event = record["event"]
-    lines = [
+    return "\n".join([
         f"shot: {shot['mass_g']:.1f} g in {shot['duration_ms'] / 1000.0:.1f} s "
         f"({'valid' if shot['valid'] else 'invalid'}; {shot['reason']})",
         f"event: brewWeightMg={event['brewWeightMg']} brewTimeMs={event['brewTimeMs']} "
         f"validity={event['validity']}",
-    ]
-    if "response" in record:
-        lines.append(f"grinder: {json.dumps(record['response'], sort_keys=True)}")
-    return "\n".join(lines)
+    ])
 
 
 def build_parser() -> argparse.ArgumentParser:

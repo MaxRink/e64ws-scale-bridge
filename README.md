@@ -38,7 +38,9 @@ python3 tools/scale_bridge.py --openscale hds.local \
 
 `--allow-no-password` is the explicit FW-01 workaround for an owner-controlled
 unit with no Owner password. `--apply` changes the grinder and requires `--yes`.
-The bridge prints the event by default. Tokens and passwords are never printed.
+The bridge prints the event by default, before any write, and prints the
+grinder's response afterwards. A failed send therefore still records the event
+it attempted. Tokens and passwords are never printed.
 
 Read-only preflight (no scale source and no `AddBrewEvent`):
 

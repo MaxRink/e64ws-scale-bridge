@@ -1,4 +1,10 @@
+import contextlib
+import io
+import json
+import os
+import tempfile
 import unittest
+from unittest import mock
 
 from tools.scale_bridge import (
     Shot,
@@ -212,6 +218,106 @@ class EventTests(unittest.TestCase):
         shot = Shot(0, 0, 0, 0, 0, 0, 0, False, "none")
         with self.assertRaises(ValueError):
             build_add_brew_event(shot)
+
+
+class ApplyAuditTests(unittest.TestCase):
+    """The event is printed and flushed before the grinder write."""
+
+    POINTS = [
+        (0.0, 0.0), (0.0, 200.0),
+        (2.0, 400.0), (10.0, 600.0),
+        (18.0, 800.0), (18.0, 1000.0), (18.0, 1200.0),
+    ]
+
+    def _replay(self, directory: str) -> str:
+        path = os.path.join(directory, "shot.jsonl")
+        with open(path, "w", encoding="utf-8") as handle:
+            for grams, ms in self.POINTS:
+                handle.write(json.dumps({"grams": grams, "ms": float(ms)}) + "\n")
+        return path
+
+    def _args(self, replay: str, *extra: str) -> list[str]:
+        return [
+            "--replay", replay, "--grinder", "192.0.2.1", "--token", "test-token",
+            "--apply", "--yes", "--once",
+            "--baseline-samples", "2", "--min-duration-ms", "400",
+            "--valid-min-ms", "400", "--stable-ms", "200",
+            *extra,
+        ]
+
+    def test_event_line_is_flushed_before_a_failing_send(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            replay = self._replay(tmp)
+            output = io.StringIO()
+            seen: dict[str, str] = {}
+
+            def failing_send(*_args: object, **_kwargs: object) -> dict:
+                seen["at_send"] = output.getvalue()
+                raise RuntimeError("transport refused the connection")
+
+            with mock.patch("tools.scale_bridge.send_add_brew_event", failing_send):
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                    code = main(self._args(replay))
+
+            text = output.getvalue()
+            self.assertEqual(code, 2)
+            # The audit record is on stdout before the transport is used.
+            self.assertIn("brewWeightMg", seen["at_send"])
+            self.assertNotIn("transport refused", seen["at_send"])
+            # ... and it still precedes the error the CLI reports.
+            self.assertIn("transport refused the connection", text)
+            self.assertLess(
+                text.index("brewWeightMg"), text.index("transport refused the connection")
+            )
+
+    def test_response_is_printed_after_the_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            replay = self._replay(tmp)
+            output = io.StringIO()
+            seen: dict[str, str] = {}
+
+            def ok_send(*_args: object, **_kwargs: object) -> dict:
+                seen["at_send"] = output.getvalue()
+                return {"success": True}
+
+            with mock.patch("tools.scale_bridge.send_add_brew_event", ok_send):
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                    code = main(self._args(replay))
+
+            self.assertEqual(code, 0)
+            self.assertIn("brewWeightMg", seen["at_send"])
+            self.assertNotIn("success", seen["at_send"])
+            text = output.getvalue()
+            self.assertLess(text.index("brewWeightMg"), text.index('"success"'))
+
+    def test_json_mode_keeps_the_event_and_the_response_separate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            replay = self._replay(tmp)
+            output = io.StringIO()
+
+            def ok_send(*_args: object, **_kwargs: object) -> dict:
+                return {"success": True}
+
+            with mock.patch("tools.scale_bridge.send_add_brew_event", ok_send):
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                    code = main(self._args(replay, "--json"))
+
+            self.assertEqual(code, 0)
+            decoder = json.JSONDecoder()
+            text = output.getvalue()
+            documents = []
+            index = 0
+            while True:
+                while index < len(text) and text[index].isspace():
+                    index += 1
+                if index >= len(text):
+                    break
+                document, index = decoder.raw_decode(text, index)
+                documents.append(document)
+            self.assertEqual(len(documents), 2)
+            self.assertNotIn("response", documents[0])
+            self.assertEqual(documents[0]["event"]["brewWeightMg"], 18000)
+            self.assertEqual(documents[1], {"response": {"success": True}})
 
 
 class CliPreflightTests(unittest.TestCase):

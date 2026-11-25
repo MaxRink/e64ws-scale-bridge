@@ -64,7 +64,10 @@ python3 tools/scale_bridge.py --openscale hds.local \
 > [LIVE_VALIDATION.md](LIVE_VALIDATION.md).
 
 If you have a token already, pass `--token` and `--wss-port 9997`. Do not put a
-token in shell history. The event is printed before it is sent.
+token in shell history. The event is printed and flushed before it is sent, so
+a failed send still leaves the audit line on stdout. With `--apply` the
+grinder's response is printed afterwards as a second document (`--json`) or as
+the `grinder:` line.
 
 Read-only preflight before a write path:
 
