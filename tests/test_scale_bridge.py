@@ -2,8 +2,11 @@ import contextlib
 import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from tools.scale_bridge import (
@@ -16,6 +19,7 @@ from tools.scale_bridge import (
     parse_ble_weight,
     parse_decent_weight,
     parse_gatt_weight,
+    _print_record,
 )
 
 
@@ -265,7 +269,12 @@ class EventTests(unittest.TestCase):
 
 
 class ApplyAuditTests(unittest.TestCase):
-    """The event is printed and flushed before the grinder write."""
+    """The event is printed before the grinder write.
+
+    These tests use an in-memory stdout, so they pin the *order* only; the
+    flush that the guarantee also needs is pinned in ``AuditFlushTests``,
+    which writes to a real file.
+    """
 
     POINTS = [
         (0.0, 0.0), (0.0, 200.0),
@@ -431,6 +440,88 @@ class RejectedActionTests(unittest.TestCase):
         self.assertEqual(code, self.REFUSED_EXIT)
         self.assertNotIn(self.TOKEN, stderr)
         self.assertIn("<redacted>", stderr)
+
+
+class AuditFlushTests(unittest.TestCase):
+    """Pin the flush that the audit guarantee depends on.
+
+    ``redirect_stdout(io.StringIO())`` cannot tell a flushed print from a
+    buffered one, so deleting ``sys.stdout.flush()`` from ``_print_record``
+    used to leave the suite green.  These two tests write to a real file
+    instead: bytes are on disk only after a flush, and a hard ``os._exit``
+    skips every remaining buffer.
+    """
+
+    POINTS = ApplyAuditTests.POINTS
+
+    CRASH_SCRIPT = """
+import os
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from tools import scale_bridge
+
+
+def crash(*_args, **_kwargs):
+    # The transport takes the process down before the interpreter can flush
+    # anything at exit: only an explicit flush survives.
+    os._exit(9)
+
+
+scale_bridge.send_add_brew_event = crash
+raise SystemExit(scale_bridge.main(sys.argv[2:]))
+"""
+
+    def _args(self, replay: str) -> list[str]:
+        return [
+            "--replay", replay, "--grinder", "192.0.2.1", "--token", "test-token",
+            "--apply", "--yes", "--once",
+            "--baseline-samples", "2", "--min-duration-ms", "400",
+            "--valid-min-ms", "400", "--stable-ms", "200",
+        ]
+
+    def _replay(self, tmp: str) -> str:
+        path = os.path.join(tmp, "shot.jsonl")
+        with open(path, "w", encoding="utf-8") as handle:
+            for grams, ms in self.POINTS:
+                handle.write(json.dumps({"grams": grams, "ms": float(ms)}) + "\n")
+        return path
+
+    def test_the_record_reaches_a_real_file_before_the_handle_is_closed(self) -> None:
+        record = {
+            "shot": {"mass_g": 18.0, "duration_ms": 600.0, "valid": True,
+                     "reason": "stable weight"},
+            "event": {"brewWeightMg": 18000, "brewTimeMs": 600, "validity": True},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "audit.txt"
+            handle = open(path, "w", encoding="utf-8")
+            try:
+                with contextlib.redirect_stdout(handle):
+                    _print_record(record, as_json=False)
+                # Nothing has closed or flushed *handle* here: the only way
+                # these bytes can be on disk is _print_record's own flush.
+                self.assertIn("brewWeightMg=18000", path.read_text(encoding="utf-8"))
+            finally:
+                handle.close()
+
+    def test_the_record_survives_a_transport_that_kills_the_process(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            replay = self._replay(tmp)
+            audit = Path(tmp) / "audit.txt"
+            with open(audit, "w", encoding="utf-8") as handle:
+                proc = subprocess.run(
+                    [sys.executable, "-c", self.CRASH_SCRIPT,
+                     str(Path(__file__).resolve().parent.parent), *self._args(replay)],
+                    stdout=handle,
+                    stderr=subprocess.DEVNULL,
+                    timeout=120,
+                    check=False,
+                )
+            self.assertEqual(proc.returncode, 9, "the crash path must have run")
+            text = audit.read_text(encoding="utf-8")
+            self.assertIn("brewWeightMg", text)
+            self.assertNotIn("response", text)
 
 
 class CliPreflightTests(unittest.TestCase):
