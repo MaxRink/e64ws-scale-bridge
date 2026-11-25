@@ -7,6 +7,7 @@ client.  No hardware, no grinder and no PHP server are needed.
 from __future__ import annotations
 
 import json
+import re
 import socket
 import struct
 import tempfile
@@ -14,9 +15,31 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from ondevice.scalebridged import ScaleDaemon
+from ondevice.scalebridged import ScaleDaemon, main
 from tools.scale_bridge import ShotDetector
+
+REPO = Path(__file__).resolve().parent.parent
+INSTALLER = REPO / "ondevice" / "install.sh"
+
+
+def installer_config() -> dict:
+    """Return the config.json body that install.sh writes on a fresh install.
+
+    Read out of the installer itself so this test follows the real default
+    config instead of a copy of it that can drift.
+    """
+
+    text = INSTALLER.read_text(encoding="utf-8")
+    for block in re.findall(r"<<EOF\n(.*?)\nEOF\n", text, re.DOTALL):
+        try:
+            value = json.loads(block.replace("$TOKEN", "0" * 32))
+        except ValueError:
+            continue
+        if isinstance(value, dict) and "ingest_token" in value:
+            return value
+    raise AssertionError("install.sh no longer writes a JSON config heredoc")
 
 
 def _frame(text: str) -> bytes:
@@ -94,6 +117,89 @@ def shot_samples() -> list[dict]:
         {"grams": 18.0, "ms": 3500},
     ]
     return samples
+
+
+class CliConfigPrecedenceTests(unittest.TestCase):
+    """The command line wins over config.json; the config is the fallback.
+
+    The fresh-install case is the one that broke: install.sh always writes
+    ``max_shot_ms``, so a rule that lets the config win makes ``--max-shot-ms``
+    dead on every installed unit.  The fixture is therefore the installer's own
+    config body.
+    """
+
+    def _main(self, config: dict | None, argv: list[str]) -> tuple[int, dict]:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            if config is not None:
+                path.write_text(json.dumps(config))
+            with mock.patch("ondevice.scalebridged.ScaleDaemon") as daemon_cls, \
+                    mock.patch("ondevice.scalebridged.drop_privileges"), \
+                    mock.patch("ondevice.scalebridged.signal.signal"):
+                code = main([
+                    "--config", str(path),
+                    "--state", str(Path(tmp) / "state.json"),
+                    "--no-shots",
+                    *argv,
+                ])
+        self.assertEqual(daemon_cls.call_count, 1)
+        kwargs = dict(daemon_cls.call_args.kwargs)
+        kwargs["url"] = daemon_cls.call_args.args[0]
+        return code, kwargs
+
+    def test_max_shot_ms_flag_overrides_a_fresh_install_config(self) -> None:
+        code, kwargs = self._main(installer_config(), ["--max-shot-ms", "30000"])
+        self.assertEqual(code, 0)
+        self.assertEqual(kwargs["detector"].max_shot_ms, 30_000.0)
+
+    def test_max_shot_ms_config_is_used_when_the_flag_is_absent(self) -> None:
+        config = installer_config()
+        config["max_shot_ms"] = 45_000
+        _, kwargs = self._main(config, [])
+        self.assertEqual(kwargs["detector"].max_shot_ms, 45_000.0)
+
+    def test_max_shot_ms_falls_back_to_the_documented_default(self) -> None:
+        _, kwargs = self._main(None, [])
+        self.assertEqual(kwargs["detector"].max_shot_ms, 120_000.0)
+
+    def test_finishing_ms_config_is_honoured(self) -> None:
+        # The daemon used to ignore config.json's finishing_ms because the
+        # flag's truthy default always won.
+        config = installer_config()
+        config["finishing_ms"] = 7500
+        _, kwargs = self._main(config, [])
+        self.assertEqual(kwargs["finishing_ms"], 7500)
+
+    def test_finishing_ms_flag_overrides_the_config(self) -> None:
+        config = installer_config()
+        config["finishing_ms"] = 7500
+        _, kwargs = self._main(config, ["--finishing-ms", "1200"])
+        self.assertEqual(kwargs["finishing_ms"], 1200)
+
+    def test_timeout_config_is_honoured(self) -> None:
+        config = installer_config()
+        config["timeout"] = 25
+        _, kwargs = self._main(config, [])
+        self.assertEqual(kwargs["timeout"], 25.0)
+
+    def test_path_config_is_honoured(self) -> None:
+        config = installer_config()
+        config["path"] = "/weigh"
+        _, kwargs = self._main(config, [])
+        self.assertEqual(kwargs["url"], "ws://hds.local:80/weigh")
+
+    def test_path_flag_overrides_the_config(self) -> None:
+        config = installer_config()
+        config["path"] = "/weigh"
+        _, kwargs = self._main(config, ["--path", "/snapshot"])
+        self.assertEqual(kwargs["url"], "ws://hds.local:80/snapshot")
+
+    def test_a_bad_config_number_is_a_clean_refusal(self) -> None:
+        config = installer_config()
+        config["max_shot_ms"] = "soon"
+        with self.assertRaises(SystemExit) as caught:
+            self._main(config, [])
+        self.assertIn("max_shot_ms", str(caught.exception))
 
 
 class OnDeviceDaemonTests(unittest.TestCase):

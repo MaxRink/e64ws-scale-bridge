@@ -78,7 +78,15 @@ interval if GBS misses the finishing state.
 `max_shot_ms` bounds an active shot. A reading that never settles would
 otherwise stay active forever and keep `MA_STATUS=3` (serving). At the bound the
 shot is written as invalid with `reason: "timeout"`, so the status advances to
-finishing and then idle. `--max-shot-ms` overrides the config value.
+finishing and then idle.
+
+Both keys are read from this file at start-up, and both have a flag that
+overrides the file: `--finishing-ms` and `--max-shot-ms`. The rule is the same
+for `timeout`/`--timeout` and `path`/`--path`: **the flag wins, the config value
+is the fallback**, and the built-in default (`3000`, `120000`, `10`,
+`/snapshot`) applies only when neither is set. Tune them in `config.json` for a
+daemon started by the init script, which passes no flags; pass the flag when
+running `scalebridged.py` by hand.
 
 ## What gets installed
 
@@ -283,8 +291,8 @@ image.
 Off-device:
 
 ```sh
-# daemon + existing bridge tests (101 tests; the 11 PHP-endpoint tests skip
-# as a group when php is not on PATH, so such a run reports "Ran 90")
+# daemon + existing bridge tests (110 tests; the 11 PHP-endpoint tests skip
+# as a group when php is not on PATH, so such a run reports "Ran 99")
 python3 -m unittest discover -s tests -v
 
 # PHP 8.4 endpoints/page/ESP32 ingest, in Docker

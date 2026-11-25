@@ -113,6 +113,14 @@ never meets the `--stability-g` finish window (a cup that keeps moving, a stuck
 sensor) would otherwise stay active forever and hold the on-device status in
 serving. At the bound the shot is closed with `validity: false` and
 `reason: "timeout"`, so the event is still reported and the next shot can start.
+The bound becomes `REAL_EXTRACTION_TIME_MS` for the `finishing_ms` window, so a
+timeout shot shows up in Xenia as a long extraction with `validity: false`; see
+[REVIEW_FOLLOWUPS.md](REVIEW_FOLLOWUPS.md).
+
+On the device the same three numbers come from `/db/scale-bridge/config.json`
+(`max_shot_ms`, `finishing_ms`, `timeout`) and the flags above override the
+file. Flags win, config is the fallback; see
+[ON_DEVICE_INSTALL.md](ON_DEVICE_INSTALL.md).
 
 ## 5. Replay and troubleshooting
 

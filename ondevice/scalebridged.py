@@ -445,17 +445,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--url", help="ws://host[:port]/snapshot (overrides config)")
     parser.add_argument("--host")
     parser.add_argument("--port", type=int)
-    parser.add_argument("--path", default="/snapshot")
+    # Every option that also exists in config.json defaults to None so that
+    # "was it given on the command line?" can be answered.  A truthy argparse
+    # default silently wins over (or, worse, loses to) the config depending on
+    # the order of the two lookups; see _resolve().
+    parser.add_argument("--path", help="endpoint path (default /snapshot)")
     parser.add_argument("--state", default=os.environ.get("SCALE_BRIDGE_STATE", DEFAULT_STATE))
     parser.add_argument("--shots", default=os.environ.get("SCALE_BRIDGE_SHOTS", DEFAULT_SHOTS))
     parser.add_argument("--no-shots", action="store_true", help="do not persist shot history")
-    parser.add_argument("--finishing-ms", type=int, default=3000)
-    parser.add_argument("--timeout", type=float, default=10.0)
+    parser.add_argument("--finishing-ms", type=int,
+                        help="how long /api/v2/mako reports finishing (default 3000)")
+    parser.add_argument("--timeout", type=float, help="socket timeout in seconds (default 10)")
     parser.add_argument("--stable-ms", type=float, default=1000.0)
     parser.add_argument("--min-duration-ms", type=float, default=3000.0)
     parser.add_argument("--valid-min-ms", type=float, default=15000.0)
-    parser.add_argument("--max-shot-ms", type=float, default=120_000.0,
-                        help="close an active shot as invalid (timeout) after this long")
+    parser.add_argument("--max-shot-ms", type=float,
+                        help="close an active shot as invalid (timeout) after this long "
+                             "(default 120000)")
     parser.add_argument("--once", action="store_true", help="exit after the first shot")
     parser.add_argument("--duration", type=float, default=0.0, help="exit after N seconds")
     parser.add_argument("--user", default=os.environ.get("SCALE_BRIDGE_USER", ""),
@@ -477,6 +483,31 @@ def drop_privileges(user: str) -> None:
     os.setuid(entry.pw_uid)
 
 
+def _resolve(cli_value: Any, config: dict[str, Any], key: str, default: Any) -> Any:
+    """Resolve one tunable: the command line wins, the config is the fallback.
+
+    Both sources are consulted in the same order for every option, so the
+    documented precedence ("the flag overrides the config value") holds for
+    each one.  ``load_config`` has already rejected a non-object config.
+    """
+
+    if cli_value is not None:
+        return cli_value
+    value = config.get(key, default)
+    if value is None or isinstance(value, bool):
+        raise SystemExit(f"config {key} must be a number or a string, not {value!r}")
+    return value
+
+
+def _resolve_number(cli_value: Any, config: dict[str, Any], key: str, default: Any,
+                    *, integer: bool = False) -> Any:
+    value = _resolve(cli_value, config, key, default)
+    try:
+        return int(value) if integer else float(value)
+    except (TypeError, ValueError):
+        raise SystemExit(f"config {key} must be a number, not {value!r}") from None
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = load_config(args.config)
@@ -484,22 +515,23 @@ def main(argv: list[str] | None = None) -> int:
     if not url:
         host = args.host or config.get("host") or "hds.local"
         port = args.port or int(config.get("port", 80))
-        path = args.path or config.get("path", "/snapshot")
+        path = _resolve(args.path, config, "path", "/snapshot")
         url = f"ws://{host}:{port}{path if str(path).startswith('/') else '/' + str(path)}"
     drop_privileges(args.user)
     detector = ShotDetector(
         stable_ms=args.stable_ms,
         min_duration_ms=args.min_duration_ms,
         valid_min_ms=args.valid_min_ms,
-        max_shot_ms=float(config.get("max_shot_ms", args.max_shot_ms)),
+        max_shot_ms=_resolve_number(args.max_shot_ms, config, "max_shot_ms", 120_000.0),
     )
     daemon = ScaleDaemon(
         url,
         state_path=args.state,
         shots_path=None if args.no_shots else args.shots,
         detector=detector,
-        finishing_ms=args.finishing_ms or int(config.get("finishing_ms", 3000)),
-        timeout=args.timeout or float(config.get("timeout", 10.0)),
+        finishing_ms=_resolve_number(args.finishing_ms, config, "finishing_ms", 3000,
+                                     integer=True),
+        timeout=_resolve_number(args.timeout, config, "timeout", 10.0),
         verbose=args.verbose,
     )
 
