@@ -149,11 +149,11 @@ python3 -m unittest discover -s tests -v
 the WSS client's timeout/redaction paths, the Xenia emulator routes, the
 on-device daemon, the lighttpd snapshot/restore patch and these docs. Fifteen
 of them exercise the on-device Xenia endpoints, WebUI page, ESP32 ingest and
-state freshness; they skip as a group when `php` is not on `PATH`. Four more
-drive `ondevice/uninstall.sh` for real inside a container and skip when Docker
-is unavailable. `./tools/run_php_tests.sh` runs the same fifteen against PHP
-8.4 in Docker and `python3 -m unittest tests.test_ondevice_shell` runs the
-uninstall suite. The bridge was also exercised against the QEMU E64: an
+state freshness; they skip as a group when `php` is not on `PATH`. A further
+set drives `install.sh`, `uninstall.sh` and the init script for real inside a
+container and skips when Docker is unavailable. `./tools/run_php_tests.sh` runs
+the fifteen against PHP 8.4 in Docker and
+`python3 -m unittest tests.test_ondevice_shell` runs the shell suite. The bridge was also exercised against the QEMU E64: an
 18 g / 24.6 s replay produced `brewTimeMs=24600`, `brewWeightMg=18000`,
 `validity=true`, and `AddBrewEvent` returned `{"success": true}` in development
 mode.

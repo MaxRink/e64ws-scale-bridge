@@ -1,9 +1,10 @@
-"""End-to-end tests for ondevice/uninstall.sh, in a throwaway container.
+"""End-to-end tests for the on-device shell scripts, in a throwaway container.
 
-The script works on absolute device paths (/usr/local/www, /db/scale-bridge,
-/etc/lighttpd), so the only honest way to exercise it is to run it for real in
-a root filesystem that is not the host's.  Docker is the same harness the PHP
-endpoint tests use; these tests skip when it is unavailable.
+uninstall.sh, install.sh and S95scalebridge work on absolute device paths
+(/usr/local/www, /db/scale-bridge, /etc/lighttpd, /log), so the only honest way
+to exercise them is to run them for real in a root filesystem that is not the
+host's.  Docker is the same harness the PHP endpoint tests use; these tests
+skip when it is unavailable.
 
 `lighttpd -t` is a stub here: the subject is the installer's control flow (does
 it notice that the /api/v2/ exemption survived, does it say so, does it exit

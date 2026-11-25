@@ -20,6 +20,18 @@ REVIEW_ITEMS = (
     "tare",
     "dropout",
     "redaction",
+    # The items that used to be dropped silently, and the ones this round added.
+    "https exemption",
+    "--max-shot-ms",
+    "--restore",
+    "rejected action",
+    "audit flush",
+    "serving",
+    "uninstall",
+    "rotation",
+    "partial config writes",
+    "ble sample queue",
+    "timeout shot",
 )
 
 STATUS_MARKERS = (
@@ -98,6 +110,9 @@ class DocumentationAgreementTests(unittest.TestCase):
                 f"review item has no explicit status: {item}",
             )
         self.assertIn("Nothing in this list is silently dropped", text)
+        # The claim is only meaningful if the table also records what *was*
+        # dropped, so the correction cannot be quietly deleted.
+        self.assertIn("was **not** true before", text)
 
 
 if __name__ == "__main__":
