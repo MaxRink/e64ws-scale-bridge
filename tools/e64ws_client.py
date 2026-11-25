@@ -47,7 +47,17 @@ except ModuleNotFoundError:  # pragma: no cover - package import path
 
 REDACTED = "<redacted>"
 _BEARER_RE = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
-_TOKEN_QUERY_RE = re.compile(r"(?i)([?&](?:token|access_token)=)[^&\s'\"]+")
+# Any Authorization header, not just the Bearer scheme: a peer that echoes
+# request headers does not have to use Bearer, and "Basic <base64>" is a
+# credential too.  Only the value is replaced, so a redacted JSON document
+# keeps its quotes and stays parseable.
+_AUTHORIZATION_RE = re.compile(
+    r"""(?i)(\bauthorization\b["']?\s*[:=]\s*["']?)([^\r\n,;{}"']+)"""
+)
+# Fail closed: after a token= key, hide the rest of the query string.  A token
+# may itself contain "&", and then "?token=alpha&bravo" used to leave the
+# "&bravo" tail of the secret in the log line.
+_TOKEN_QUERY_RE = re.compile(r"(?i)([?&](?:token|access_token)=)[^\s'\"#]+")
 
 
 def redact(value: object, secret: str = "") -> str:
@@ -69,6 +79,7 @@ def redact(value: object, secret: str = "") -> str:
     if secret:
         text = text.replace(secret, REDACTED)
     text = _TOKEN_QUERY_RE.sub(rf"\1{REDACTED}", text)
+    text = _AUTHORIZATION_RE.sub(rf"\1{REDACTED}", text)
     return _BEARER_RE.sub(f"Bearer {REDACTED}", text)
 
 

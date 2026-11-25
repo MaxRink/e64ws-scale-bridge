@@ -76,9 +76,10 @@ in a 403 body echoes `?token=...` with it. (websocket-client does not quote the
 URL itself on a failed handshake; the echo in the *body* is the real leak
 vector, which is why redaction cannot be limited to messages this tool writes.)
 Every message and the grinder's response payload are therefore redacted before
-they are printed -- the token literal, `token=` query values and `Bearer`
-values -- and the exception chain is cut so the unredacted text cannot
-resurface in a traceback.
+they are printed -- the token literal, `token=`/`access_token=` query values
+(everything after the key, so a token containing `&` is not half redacted) and
+any `Authorization` value, `Bearer` or not -- and the exception chain is cut so
+the unredacted text cannot resurface in a traceback.
 
 Read-only preflight before a write path:
 

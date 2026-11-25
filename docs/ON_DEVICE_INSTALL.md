@@ -301,7 +301,7 @@ image.
 Off-device:
 
 ```sh
-# daemon + existing bridge tests (131 tests; the 11 PHP-endpoint tests skip
+# daemon + existing bridge tests (133 tests; the 11 PHP-endpoint tests skip
 # as a group when php is not on PATH, so such a run reports "Ran 107")
 python3 -m unittest discover -s tests -v
 

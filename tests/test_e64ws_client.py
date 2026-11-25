@@ -136,6 +136,24 @@ class RedactionTests(unittest.TestCase):
         self.assertNotIn(self.TOKEN, output.getvalue())
         self.assertIn("<redacted>", output.getvalue())
 
+    def test_authorization_values_of_any_scheme_are_redacted(self) -> None:
+        # GUIDE said "any Authorization value"; redact() only matched the
+        # Bearer scheme, so a Basic header (a credential too) survived.
+        cleaned = redact("Authorization: Basic dXNlcjpwYXNz")
+        self.assertNotIn("dXNlcjpwYXNz", cleaned)
+        self.assertIn("<redacted>", cleaned)
+        # The same header inside a JSON body must stay valid JSON.
+        document = json.loads(redact('{"Authorization": "Bearer abc123"}'))
+        self.assertEqual(document["Authorization"], "<redacted>")
+
+    def test_a_token_containing_an_ampersand_is_fully_redacted(self) -> None:
+        # Without the literal secret, "?token=alpha&bravo" used to redact only
+        # "alpha" and leave the "&bravo" tail of the token in the log line.
+        cleaned = redact("denied: /?token=alpha&bravo=1")
+        self.assertNotIn("alpha", cleaned)
+        self.assertNotIn("bravo", cleaned)
+        self.assertIn("token=<redacted>", cleaned)
+
     def test_the_query_string_still_carries_the_token(self) -> None:
         fake = _FakeWebSocketModule([])
         good = _FakeSocket(frames=(json.dumps(RESPONSE),))
