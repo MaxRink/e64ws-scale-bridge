@@ -42,6 +42,16 @@ class ScaleParserTests(unittest.TestCase):
             parse_ble_weight(bytes([0x00, 0xC8, 0x00]), "auto"), 1000.0
         )
 
+    def test_auto_parser_keeps_a_decent_zero_frame(self) -> None:
+        # Regression: 0.0 is falsy, so ``decent or gatt`` used to parse the same
+        # bytes as an imperial GATT frame and reported 934.4 g instead of 0 g.
+        # 03 ce 0000 0000 b6 is a legitimate 0.0 g Decent notification.
+        self.assertEqual(parse_ble_weight(bytes.fromhex("03ce00000000b6"), "auto"), 0.0)
+        # The generic fallback must still work when the Decent parse declines.
+        self.assertAlmostEqual(
+            parse_ble_weight(bytes([0x00, 0xC8, 0x00]), "auto"), 1000.0
+        )
+
 
 class ShotDetectorTests(unittest.TestCase):
     def _feed(self, detector: ShotDetector, points: list[tuple[float, float]]):

@@ -303,7 +303,14 @@ def parse_ble_weight(payload: bytes, kind: str) -> float | None:
         return parse_decent_weight(payload)
     if kind == "generic":
         return parse_gatt_weight(payload)
-    return parse_decent_weight(payload) or parse_gatt_weight(payload)
+    # ``auto``: try the Decent layout first, then the standard GATT one.  The
+    # check must be ``is not None``: a valid 0 g frame parses to ``0.0``, which
+    # is falsy, and an ``or`` would fall through and read the same bytes as an
+    # imperial GATT measurement (934.4 g for 03ce00000000b6).
+    decent = parse_decent_weight(payload)
+    if decent is not None:
+        return decent
+    return parse_gatt_weight(payload)
 
 
 def iter_replay(path: str | Path) -> Iterator[ScaleSample]:
