@@ -143,6 +143,7 @@ class ShotDetector:
         min_duration_ms: float = 3000.0,
         valid_min_ms: float = 15000.0,
         drop_threshold_g: float = 2.0,
+        max_shot_ms: float = 120_000.0,
     ) -> None:
         if baseline_samples < 1:
             raise ValueError("baseline_samples must be positive")
@@ -152,6 +153,8 @@ class ShotDetector:
             raise ValueError("stability_g must not be negative")
         if stable_ms <= 0 or min_duration_ms <= 0 or valid_min_ms <= 0:
             raise ValueError("time windows must be positive")
+        if not math.isfinite(max_shot_ms) or max_shot_ms <= 0:
+            raise ValueError("max_shot_ms must be a positive number of milliseconds")
         self.baseline_samples = baseline_samples
         self.start_threshold_g = start_threshold_g
         self.stability_g = stability_g
@@ -159,6 +162,7 @@ class ShotDetector:
         self.min_duration_ms = min_duration_ms
         self.valid_min_ms = valid_min_ms
         self.drop_threshold_g = drop_threshold_g
+        self.max_shot_ms = max_shot_ms
         self._idle: list[ScaleSample] = []
         self._baseline: float | None = None
         self._last_ms: float | None = None
@@ -196,9 +200,17 @@ class ShotDetector:
         self._start_g = 0.0
         self._peak_g = 0.0
 
-    def _finish(self, end_ms: float, mass_g: float, reason: str) -> Shot:
+    def _finish(
+        self,
+        end_ms: float,
+        mass_g: float,
+        reason: str,
+        *,
+        valid: bool | None = None,
+    ) -> Shot:
         duration = end_ms - self._start_ms
-        valid = duration >= self.valid_min_ms and mass_g > 0
+        if valid is None:
+            valid = duration >= self.valid_min_ms and mass_g > 0
         shot = Shot(
             start_ms=self._start_ms,
             end_ms=end_ms,
@@ -247,6 +259,14 @@ class ShotDetector:
         self._samples.append(sample)
         self._peak_g = max(self._peak_g, sample.grams)
         elapsed = sample.ms - self._start_ms
+
+        if elapsed >= self.max_shot_ms:
+            # A reading that never settles (a drifting cup, a stuck sensor) must
+            # not leave the detector active forever: that keeps the on-device
+            # status in serving and nothing else can start.  Close it as an
+            # explicitly invalid shot so the caller still sees an audit event.
+            mass = sample.grams - self._start_g
+            return self._finish(sample.ms, mass, "timeout", valid=False)
 
         if elapsed >= self.min_duration_ms:
             cutoff = sample.ms - self.stable_ms
@@ -539,6 +559,7 @@ def _run(args: argparse.Namespace) -> int:
         min_duration_ms=args.min_duration_ms,
         valid_min_ms=args.valid_min_ms,
         drop_threshold_g=args.drop_threshold_g,
+        max_shot_ms=args.max_shot_ms,
     )
     token = _token_for(args) if args.apply else ""
     for sample in _samples_for(args):
@@ -601,6 +622,8 @@ def build_parser() -> argparse.ArgumentParser:
     detect.add_argument("--min-duration-ms", type=float, default=3000.0)
     detect.add_argument("--valid-min-ms", type=float, default=15000.0)
     detect.add_argument("--drop-threshold-g", type=float, default=2.0)
+    detect.add_argument("--max-shot-ms", type=float, default=120_000.0,
+                        help="close an active shot as invalid (timeout) after this long")
     detect.add_argument("--once", action="store_true", help="exit after the first completed shot")
 
     grinder = parser.add_argument_group("grinder (only with --apply)")

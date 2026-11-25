@@ -66,6 +66,7 @@ Default config:
   "path": "/snapshot",
   "timeout": 10,
   "finishing_ms": 3000,
+  "max_shot_ms": 120000,
   "ingest_token": "<random token for the ESP32 gateway>"
 }
 ```
@@ -73,6 +74,11 @@ Default config:
 `finishing_ms` is how long `/api/v2/mako` keeps returning
 `MA_STATUS=4`/`REAL_EXTRACTION_TIME_MS` after a shot. Tune it to the E64 poll
 interval if GBS misses the finishing state.
+
+`max_shot_ms` bounds an active shot. A reading that never settles would
+otherwise stay active forever and keep `MA_STATUS=3` (serving). At the bound the
+shot is written as invalid with `reason: "timeout"`, so the status advances to
+finishing and then idle. `--max-shot-ms` overrides the config value.
 
 ## What gets installed
 

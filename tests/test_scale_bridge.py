@@ -115,6 +115,65 @@ class ShotDetectorTests(unittest.TestCase):
         self.assertEqual(shot.reason, "cup removed / weight drop")
         self.assertAlmostEqual(shot.mass_g, 20.0, places=1)
 
+    def test_never_flat_series_times_out_instead_of_hanging(self) -> None:
+        # A 5 minute stable 18 g plateau with a 0.2 g wobble never satisfies the
+        # <=0.15 g finish window.  The max-shot bound must close it, otherwise
+        # the detector stays active forever and wedges the on-device status.
+        detector = ShotDetector(min_duration_ms=1000.0)
+        self._feed(detector, [(0.0, ms) for ms in (0.0, 200.0, 400.0, 600.0, 800.0)])
+        shot = None
+        grams = 18.0
+        for ms in range(1000, 301_000, 500):
+            shot = detector.add(ScaleSample(grams, float(ms)))
+            grams = 18.2 if grams == 18.0 else 18.0
+            if shot is not None:
+                break
+        self.assertIsNotNone(shot, "an active shot must not stay active forever")
+        assert shot is not None
+        self.assertEqual(shot.reason, "timeout")
+        self.assertFalse(shot.valid)
+        self.assertFalse(detector.active)
+        self.assertLessEqual(shot.duration_ms, 300_000.0)
+
+    def test_max_shot_ms_is_configurable_and_invalid(self) -> None:
+        self.assertEqual(ShotDetector().max_shot_ms, 120_000.0)
+        detector = ShotDetector(min_duration_ms=1000.0, max_shot_ms=30_000.0)
+        self._feed(detector, [(0.0, ms) for ms in (0.0, 200.0, 400.0, 600.0, 800.0)])
+        shot = None
+        grams = 18.0
+        for ms in range(1000, 60_000, 500):
+            shot = detector.add(ScaleSample(grams, float(ms)))
+            grams = 18.2 if grams == 18.0 else 18.0
+            if shot is not None:
+                break
+        self.assertIsNotNone(shot)
+        assert shot is not None
+        self.assertEqual(shot.reason, "timeout")
+        self.assertAlmostEqual(shot.duration_ms, 30_000.0, places=1)
+        self.assertAlmostEqual(shot.mass_g, 18.0, places=1)
+        with self.assertRaises(ValueError):
+            ShotDetector(max_shot_ms=0.0)
+
+    def test_stable_shot_still_finishes_before_the_bound(self) -> None:
+        detector = ShotDetector(
+            baseline_samples=3,
+            min_duration_ms=1000.0,
+            valid_min_ms=3000.0,
+            stable_ms=1000.0,
+            max_shot_ms=30_000.0,
+        )
+        points = [
+            (0.0, 0.0), (0.0, 500.0), (0.0, 1000.0),
+            (2.0, 1500.0), (6.0, 2000.0), (12.0, 2500.0),
+            (18.0, 3000.0), (20.0, 3500.0), (20.0, 4000.0),
+            (20.05, 4500.0), (20.0, 5000.0),
+        ]
+        shot = self._feed(detector, points)
+        self.assertIsNotNone(shot)
+        assert shot is not None
+        self.assertEqual(shot.reason, "stable weight")
+        self.assertTrue(shot.valid)
+
     def test_rejects_non_monotonic_timestamps(self) -> None:
         detector = ShotDetector()
         detector.add(ScaleSample(0.0, 10.0))

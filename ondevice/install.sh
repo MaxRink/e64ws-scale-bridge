@@ -112,6 +112,7 @@ if [ ! -e "$DB/config.json" ]; then
   "path": "/snapshot",
   "timeout": 10,
   "finishing_ms": 3000,
+  "max_shot_ms": 120000,
   "ingest_token": "$TOKEN"
 }
 EOF

@@ -150,6 +150,43 @@ class OnDeviceDaemonTests(unittest.TestCase):
             daemon.stop()
             thread.join(timeout=3)
 
+    def test_unsettled_reading_times_out_and_leaves_serving(self) -> None:
+        # The daemon must not stay in serving because a reading never settles:
+        # the bounded shot closes as invalid and the status advances.
+        with tempfile.TemporaryDirectory() as tmp:
+            daemon = ScaleDaemon(
+                "ws://127.0.0.1:1/snapshot",
+                state_path=str(Path(tmp) / "state.json"),
+                shots_path=None,
+                detector=ShotDetector(min_duration_ms=1000.0, max_shot_ms=5000.0),
+            )
+            for ms in range(0, 1000, 200):
+                daemon.feed(0.0, float(ms))
+            grams = 18.0
+            for ms in range(1000, 20_000, 500):
+                daemon.feed(grams, float(ms))
+                grams = 18.2 if grams == 18.0 else 18.0
+                if daemon.state()["shot_count"]:
+                    break
+            state = daemon.state()
+            self.assertEqual(state["shot_count"], 1)
+            self.assertEqual(state["phase"], "finishing")
+            self.assertEqual(state["last_shot"]["reason"], "timeout")
+            self.assertFalse(state["last_shot"]["valid"])
+            self.assertFalse(daemon.detector.active)
+
+    def test_detector_reset_keeps_the_shot_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            daemon = ScaleDaemon(
+                "ws://127.0.0.1:1/snapshot",
+                state_path=str(Path(tmp) / "state.json"),
+                shots_path=None,
+                detector=ShotDetector(max_shot_ms=7000.0, stability_g=0.2),
+            )
+            daemon._reset_detector()
+            self.assertEqual(daemon.detector.max_shot_ms, 7000.0)
+            self.assertEqual(daemon.detector.stability_g, 0.2)
+
     def test_non_monotonic_scale_clock_resets_detector(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             daemon = ScaleDaemon(

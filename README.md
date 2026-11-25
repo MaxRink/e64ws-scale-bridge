@@ -56,7 +56,9 @@ scale sample -> shot detector -> AddBrewEvent data -> E64 WSS
 The detector needs a short stable baseline, starts on a rise above
 `--start-threshold-g`, ends on a stable window or cup removal, and marks the
 shot valid only at `>15 s` (the documented Sync window). The event uses
-milliseconds and milligrams.
+milliseconds and milligrams. A shot that never settles is closed at
+`--max-shot-ms` (default 120 s) as `validity: false` / `reason: "timeout"`
+instead of staying active forever.
 
 ## Supported inputs
 

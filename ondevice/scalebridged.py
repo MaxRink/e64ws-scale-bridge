@@ -291,6 +291,7 @@ class ScaleDaemon:
             min_duration_ms=self.detector.min_duration_ms,
             valid_min_ms=self.detector.valid_min_ms,
             drop_threshold_g=self.detector.drop_threshold_g,
+            max_shot_ms=self.detector.max_shot_ms,
         )
 
     def feed(self, grams: float, milliseconds: float) -> dict[str, Any] | None:
@@ -437,6 +438,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stable-ms", type=float, default=1000.0)
     parser.add_argument("--min-duration-ms", type=float, default=3000.0)
     parser.add_argument("--valid-min-ms", type=float, default=15000.0)
+    parser.add_argument("--max-shot-ms", type=float, default=120_000.0,
+                        help="close an active shot as invalid (timeout) after this long")
     parser.add_argument("--once", action="store_true", help="exit after the first shot")
     parser.add_argument("--duration", type=float, default=0.0, help="exit after N seconds")
     parser.add_argument("--user", default=os.environ.get("SCALE_BRIDGE_USER", ""),
@@ -472,6 +475,7 @@ def main(argv: list[str] | None = None) -> int:
         stable_ms=args.stable_ms,
         min_duration_ms=args.min_duration_ms,
         valid_min_ms=args.valid_min_ms,
+        max_shot_ms=float(config.get("max_shot_ms", args.max_shot_ms)),
     )
     daemon = ScaleDaemon(
         url,
