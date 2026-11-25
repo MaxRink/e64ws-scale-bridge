@@ -414,14 +414,38 @@ def iter_openscale(host: str, *, port: int = 80, timeout: float = 6.0) -> Iterat
 class BleSource:
     """BLE source using optional ``bleak``; tests cover the parsers only."""
 
+    # A BLE scale notifies at 5-10 Hz and the consumer is a synchronous
+    # detector loop; a stalled consumer must not grow this queue until the
+    # host runs out of memory.  One minute of backlog is far more than the
+    # detector can use, and the newest sample is what matters.
+    QUEUE_MAX = 600
+
     def __init__(self, address: str, *, kind: str = "auto", scan_timeout: float = 10.0) -> None:
         self.address = address
         self.kind = kind
         self.scan_timeout = scan_timeout
-        self._queue: queue.Queue[ScaleSample | BaseException | None] = queue.Queue()
+        self._queue: queue.Queue[ScaleSample | BaseException | None] = queue.Queue(
+            maxsize=self.QUEUE_MAX
+        )
+        self._dropped = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_ms = 0.0
+
+    def _offer(self, item: ScaleSample | BaseException | None) -> None:
+        """Enqueue *item*, dropping the oldest sample when the queue is full."""
+
+        while True:
+            try:
+                self._queue.put_nowait(item)
+                return
+            except queue.Full:
+                try:
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    continue
+                if isinstance(item, ScaleSample):
+                    self._dropped += 1
 
     def _on_notify(self, _characteristic: Any, data: bytearray) -> None:
         grams = parse_ble_weight(bytes(data), self.kind)
@@ -431,7 +455,7 @@ class BleSource:
         if now <= self._last_ms:
             now = self._last_ms + 1.0
         self._last_ms = now
-        self._queue.put(ScaleSample(grams, now, source=f"ble-{self.kind}"))
+        self._offer(ScaleSample(grams, now, source=f"ble-{self.kind}"))
 
     async def _loop(self) -> None:
         try:
@@ -458,9 +482,11 @@ class BleSource:
         try:
             asyncio.run(self._loop())
         except BaseException as exc:  # noqa: BLE001 - forwarded to the consumer
-            self._queue.put(exc)
+            self._offer(exc)
         finally:
-            self._queue.put(None)
+            # Through _offer as well: a plain put() on a full queue would block
+            # here forever and the consumer would never see the sentinel.
+            self._offer(None)
 
     def samples(self) -> Iterator[ScaleSample]:
         self._thread = threading.Thread(target=self._run, daemon=True)

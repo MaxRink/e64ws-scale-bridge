@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from tools.scale_bridge import (
+    BleSource,
     Shot,
     ShotDetector,
     ScaleSample,
@@ -61,6 +62,56 @@ class ScaleParserTests(unittest.TestCase):
         self.assertAlmostEqual(
             parse_ble_weight(bytes([0x00, 0xC8, 0x00]), "auto"), 1000.0
         )
+
+
+class BleBackpressureTests(unittest.TestCase):
+    """The notify callback must not grow memory without bound.
+
+    BleSource notifies at the scale's rate while a synchronous detector drains
+    the queue.  ``queue.Queue()`` was unbounded, so a consumer that stalled (a
+    transport write in the CLI, a slow replay) let the backlog grow until the
+    process died.
+    """
+
+    # The documented cap, pinned here as a value so the test fails on the
+    # behaviour (an unbounded queue) and not on a missing attribute.
+    MAX_QUEUE = 600
+
+    def test_the_queue_is_bounded_and_keeps_the_newest_samples(self) -> None:
+        source = BleSource("AA:BB:CC:DD:EE:FF")
+        total = self.MAX_QUEUE * 3
+        for index in range(total):
+            source._offer(ScaleSample(float(index), float(index * 100)))
+        self.assertEqual(source._queue.qsize(), self.MAX_QUEUE)
+        self.assertEqual(source._dropped, total - self.MAX_QUEUE)
+        oldest = source._queue.get_nowait()
+        self.assertEqual(oldest.grams, float(total - self.MAX_QUEUE))
+
+    def test_the_end_of_stream_sentinel_still_fits(self) -> None:
+        # A plain put() would block forever on a full queue and the consumer
+        # would never see the sentinel.
+        source = BleSource("AA:BB:CC:DD:EE:FF")
+        for index in range(self.MAX_QUEUE + 10):
+            source._offer(ScaleSample(float(index), float(index)))
+        source._offer(None)
+        drained = []
+        while True:
+            item = source._queue.get_nowait()
+            drained.append(item)
+            if item is None:
+                break
+        self.assertIsNone(drained[-1])
+
+    def test_notifications_go_through_the_bounded_path(self) -> None:
+        # Deliberately uses only what both the old and the new class expose, so
+        # this one fails on behaviour (a growing queue) rather than on a
+        # missing attribute.
+        source = BleSource("AA:BB:CC:DD:EE:FF", kind="decent")
+        frame = bytearray.fromhex("03ce007b0000b6")  # 12.3 g
+        for _ in range(self.MAX_QUEUE + 50):
+            source._on_notify(None, frame)
+        self.assertEqual(source._queue.qsize(), self.MAX_QUEUE)
+        self.assertEqual(source._dropped, 50)
 
 
 class ShotDetectorTests(unittest.TestCase):
