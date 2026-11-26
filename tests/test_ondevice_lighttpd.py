@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,6 +34,11 @@ def main(argv: list[str]) -> int:
 def validate_config_text(text: str) -> str | None:
     return patch_lighttpd.validate_config_text(text)
 
+
+def snapshot(config: Path, backup: Path) -> Path:
+    return patch_lighttpd.snapshot(config, backup)
+
+
 VENDOR = '''# force redirection from http to https
 $HTTP["scheme"] == "http" {
     $HTTP["host"] =~ ".*" {
@@ -43,6 +50,34 @@ $HTTP["scheme"] == "http" {
 # What a power loss during the snapshot left behind: the vendor header and
 # nothing else.  Restoring it used to exit 0 and brick the web server.
 TRUNCATED = "# force redirection from http to https\n"
+
+
+# A single frozen second for every snapshot, so retention is exercised through
+# the same-second path on every run instead of whenever the machine is fast.
+FROZEN_STAMP = "20260101T000000Z"
+
+
+def _frozen_clock(stamp: str = FROZEN_STAMP):
+    """Pin the snapshot stamp to one second, so retention is deterministic.
+
+    Reached through the module's ``time`` object, so this keeps working if the
+    script reformats the stamp.
+    """
+
+    return mock.patch.multiple(
+        "ondevice.patch_lighttpd.time",
+        strftime=lambda *args, **kwargs: stamp,
+        gmtime=lambda *args, **kwargs: 0,
+    )
+
+
+def _aged_snapshot(backup: Path, name: str, age_ns: int, body: str) -> Path:
+    """Write a snapshot named *name* with a chosen write time."""
+
+    path = backup.with_name(backup.name + "." + name)
+    path.write_text(VENDOR + body, encoding="utf-8")
+    os.utime(path, ns=(age_ns, age_ns))
+    return path
 
 
 def _dies_after_writing_part_of_the_file():
@@ -232,9 +267,15 @@ class RestoreValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "lighttpd.conf"
             backup = Path(tmp) / "lighttpd.conf.vendor"
-            for index in range(keep + 4):
-                config.write_text(VENDOR + f"# revision {index}\n")
-                self.assertEqual(patch(config, backup), 0)
+            # Deterministic, not load-dependent: the whole run happens inside
+            # one frozen second, so every snapshot shares a stamp and retention
+            # has to fall back on the counter in the name.  Two edits that land
+            # in the same second used to be the *unlucky* case (the newest name
+            # was reused and sorted first, so the oldest revision was kept).
+            with _frozen_clock():
+                for index in range(keep + 4):
+                    config.write_text(VENDOR + f"# revision {index}\n")
+                    self.assertEqual(patch(config, backup), 0)
             snapshots = sorted(
                 item.name for item in Path(tmp).glob("lighttpd.conf.vendor.*")
                 if item.name != "lighttpd.conf.vendor"
@@ -243,8 +284,14 @@ class RestoreValidationTests(unittest.TestCase):
             # Each snapshot holds the pre-edit file, so the kept window is the
             # newest `keep` revisions (edits-keep .. edits-1).
             edits = keep + 4
-            self.assertIn("# revision %d" % (edits - keep),
-                          (Path(tmp) / snapshots[0]).read_text())
+            self.assertEqual(
+                [int(re.search(r"# revision (\d+)",
+                               (Path(tmp) / name).read_text()).group(1))
+                 for name in snapshots],
+                list(range(edits - keep, edits)),
+            )
+            # The bug this pins: with one frozen second the revisions kept were
+            # 2,3,4,5,7 -- the newest-but-one deleted while revision 2 survived.
             self.assertIn("# revision %d" % (edits - 1),
                           (Path(tmp) / snapshots[-1]).read_text())
 
@@ -278,6 +325,70 @@ class RestoreValidationTests(unittest.TestCase):
                 [item.name for item in Path(tmp).iterdir() if item.name.endswith(".tmp")],
                 [],
             )
+
+
+class SnapshotRetentionTests(unittest.TestCase):
+    """Retention keeps the newest snapshots even when their names sort first.
+
+    The name is a whole-second UTC stamp plus a ``.N`` collision suffix, and
+    the suffix used to be the first free number -- so a pruned name was handed
+    out again and ``<base>`` (newest) sorted before ``<base>.2`` (older).
+    Sorting by name therefore deleted the newest revision.  These tests pin
+    write-time order with explicit mtimes, so they do not depend on how fast
+    the machine is or on the filesystem's timestamp granularity.
+    """
+
+    def test_retention_keeps_the_newest_even_when_its_name_sorts_first(self) -> None:
+        # The measured defect, with a reused <base>: revisions 2,3,4,5,7 were
+        # kept and 0,1,6 deleted -- the newest-but-one dropped while an older
+        # revision survived.
+        with tempfile.TemporaryDirectory() as tmp:
+            backup = Path(tmp) / "lighttpd.conf.vendor"
+            newest = _aged_snapshot(backup, FROZEN_STAMP, 3_000, "# revision 8\n")
+            older = _aged_snapshot(backup, FROZEN_STAMP + ".2", 2_000, "# revision 2\n")
+            # Name order really is the wrong way round here.
+            self.assertLess(newest.name, older.name)
+            patch_lighttpd.prune_snapshots(backup, keep=1)
+            self.assertTrue(newest.exists(), "retention deleted the newest snapshot")
+            self.assertFalse(older.exists(), "retention kept an older snapshot")
+
+    def test_a_snapshot_is_dated_by_when_it_was_taken(self) -> None:
+        # The device's vendor config ships inside a firmware image, so it can
+        # carry an old mtime; inheriting it would make a brand-new snapshot
+        # look older than every other one.
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "lighttpd.conf"
+            backup = Path(tmp) / "lighttpd.conf.vendor"
+            config.write_text(VENDOR)
+            long_ago = 1_000_000_000_000_000_000  # 2001-09-09
+            os.utime(config, ns=(long_ago, long_ago))
+            written = snapshot(config, backup)
+            self.assertGreater(written.stat().st_mtime_ns, long_ago + 10**12,
+                               "the snapshot inherited the source timestamp")
+            self.assertEqual(written.read_text(), VENDOR)
+
+    def test_describe_snapshots_names_the_newest_complete_one(self) -> None:
+        # The hint after a refused --restore must point at the newest complete
+        # snapshot; name order used to make it name an older one.
+        with tempfile.TemporaryDirectory() as tmp:
+            backup = Path(tmp) / "lighttpd.conf.vendor"
+            newest = _aged_snapshot(backup, FROZEN_STAMP, 4_000, "# revision 8\n")
+            _aged_snapshot(backup, FROZEN_STAMP + ".2", 3_000, "# revision 2\n")
+            # ... and an incomplete one that is newer than both: it must not be
+            # offered as a restore point.
+            broken = backup.with_name(backup.name + "." + FROZEN_STAMP + ".9")
+            broken.write_text(TRUNCATED, encoding="utf-8")
+            os.utime(broken, ns=(9_000, 9_000))
+            described = patch_lighttpd._describe_snapshots(backup)
+            # Compare whole paths: one name is a prefix of the other, so a
+            # substring check would pass on the wrong snapshot.
+            named = [line.split(": ", 1)[1].strip() for line in described.splitlines()
+                     if "exists: " in line]
+            hint = [line.split("--backup ", 1)[1].strip() for line in described.splitlines()
+                    if "--backup " in line]
+            self.assertEqual(named, [str(newest)])
+            self.assertEqual(hint, [str(newest)])
+            self.assertNotIn(str(broken), named + hint)
 
 
 class E64PhpCompatibilityTests(unittest.TestCase):

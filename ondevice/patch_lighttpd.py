@@ -23,6 +23,9 @@ It is idempotent and always snapshots the pre-edit file under a unique name
 next to ``--backup``.  The unpatched vendor config is the restore point and is
 refreshed whenever an edit starts from an unpatched file, so a firmware update
 that ships a new vendor config cannot leave ``--restore`` on a stale snapshot.
+Only the newest ``SNAPSHOT_KEEP`` snapshots are kept, and "newest" is by write
+time, not by name: the name is a whole-second stamp, so name order disagrees
+with reality as soon as two edits land in the same second.
 
 ``--restore`` validates the snapshot before it copies a byte: the restore point
 must be a complete lighttpd config, not the truncated file a power loss can
@@ -96,13 +99,19 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _atomic_copy(source: Path, destination: Path) -> None:
+def _atomic_copy(source: Path, destination: Path, *, preserve_times: bool = True) -> None:
     """Copy *source* to *destination* so a crash cannot leave half a file.
 
     The bytes go to a sibling ``.tmp`` file, are fsynced, and are renamed over
     *destination*.  A power loss therefore leaves the previous file or the
     complete new one -- never the truncated restore point that used to make
     ``--restore`` brick lighttpd.
+
+    ``preserve_times=False`` keeps the permissions but not the timestamps, so
+    *destination* is dated when it was written.  A snapshot has to be: its age
+    is what retention sorts on, and inheriting the date of a config file that
+    shipped inside a firmware image would make a brand-new snapshot look older
+    than every other one.
     """
 
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -112,7 +121,10 @@ def _atomic_copy(source: Path, destination: Path) -> None:
             shutil.copyfileobj(src, dst)
             dst.flush()
             os.fsync(dst.fileno())
-        shutil.copystat(source, tmp)
+        if preserve_times:
+            shutil.copystat(source, tmp)
+        else:
+            shutil.copymode(source, tmp)
         os.replace(tmp, destination)
     except BaseException:
         tmp.unlink(missing_ok=True)
@@ -167,6 +179,26 @@ def validate_config_text(text: str) -> str | None:
 SNAPSHOT_KEEP = 5
 
 
+def _snapshot_age(path: Path) -> tuple[int, str]:
+    """Sort key for the snapshots: when it was written, then its name.
+
+    Retention used to sort by name, and the name is a whole-second UTC stamp
+    with a ``.N`` collision suffix that gets *reused* once a name has been
+    pruned.  Two edits in the same second therefore produced ``<base>``
+    (newest) and ``<base>.2`` (older), and name order put ``<base>`` first --
+    so the newest snapshot was deleted and an older one kept.  Age comes from
+    ``st_mtime_ns``, which ``snapshot()`` dates at write time.  The name only
+    breaks a tie on a filesystem with a coarser clock, which is why the
+    counter in it never goes backwards.
+    """
+
+    try:
+        return (path.stat().st_mtime_ns, path.name)
+    except OSError:
+        # Vanished or unreadable: treat it as the oldest so it is pruned first.
+        return (-1, path.name)
+
+
 def prune_snapshots(backup: Path, *, keep: int = SNAPSHOT_KEEP,
                     protect: Path | None = None) -> None:
     """Keep the newest *keep* snapshots next to *backup*; drop the rest."""
@@ -176,8 +208,9 @@ def prune_snapshots(backup: Path, *, keep: int = SNAPSHOT_KEEP,
     # *protect* is the snapshot just written and counts towards the budget.
     room = keep - 1 if protect is not None else keep
     snapshots = sorted(
-        item for item in backup.parent.glob(backup.name + ".*")
-        if not item.name.endswith(".tmp") and item != protect
+        (item for item in backup.parent.glob(backup.name + ".*")
+         if not item.name.endswith(".tmp") and item != protect),
+        key=_snapshot_age,
     )
     for stale in (snapshots[:-room] if room else snapshots):
         try:
@@ -187,10 +220,12 @@ def prune_snapshots(backup: Path, *, keep: int = SNAPSHOT_KEEP,
 
 
 def _describe_snapshots(backup: Path) -> str:
-    """Name the sibling snapshots that do look complete, for the operator."""
+    """Name the newest sibling snapshot that does look complete, for the operator."""
 
     usable = []
-    for candidate in sorted(backup.parent.glob(backup.name + ".*")):
+    for candidate in sorted(backup.parent.glob(backup.name + ".*"), key=_snapshot_age):
+        if candidate.name.endswith(".tmp"):
+            continue
         try:
             text = candidate.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -200,23 +235,41 @@ def _describe_snapshots(backup: Path) -> str:
     if not usable:
         return ""
     return (
-        f"\n       a complete snapshot exists: {usable[-1]}"
+        f"\n       the newest complete snapshot exists: {usable[-1]}"
         f"\n       re-run with --backup {usable[-1]}"
     )
+
+
+def _next_snapshot_path(backup: Path) -> Path:
+    """Return an unused snapshot path that sorts after every surviving one.
+
+    The UTC stamp is for the operator; the counter is what makes the *name*
+    agree with write order.  It is ``max(existing) + 1`` rather than the first
+    free number, so a pruned name is never handed out again while an older
+    sibling still carries a higher one -- the reuse that made name ordering
+    disagree with reality.
+    """
+
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    prefix = f"{backup.name}.{stamp}."
+    highest = 0
+    for item in backup.parent.glob(prefix + "*"):
+        suffix = item.name[len(prefix):]
+        if suffix.isdigit():
+            highest = max(highest, int(suffix))
+    candidate = backup.with_name(f"{prefix}{highest + 1}")
+    while candidate.exists():  # a concurrent run took that name
+        highest += 1
+        candidate = backup.with_name(f"{prefix}{highest + 1}")
+    return candidate
 
 
 def snapshot(config: Path, backup: Path) -> Path:
     """Copy the pre-edit config to a unique sibling of *backup*."""
 
     backup.parent.mkdir(parents=True, exist_ok=True)
-    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    base = f"{backup.name}.{stamp}"
-    candidate = backup.with_name(base)
-    index = 1
-    while candidate.exists():
-        candidate = backup.with_name(f"{base}.{index}")
-        index += 1
-    _atomic_copy(config, candidate)
+    candidate = _next_snapshot_path(backup)
+    _atomic_copy(config, candidate, preserve_times=False)
     prune_snapshots(backup, protect=candidate)
     print(f"snapshotted pre-edit config to {candidate}")
     return candidate
