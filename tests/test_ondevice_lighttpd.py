@@ -8,6 +8,7 @@ import os
 import re
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -460,6 +461,36 @@ class SnapshotRetentionTests(unittest.TestCase):
             self.assertEqual(named, [str(newest)])
             self.assertEqual(hint, [str(newest)])
             self.assertNotIn(str(broken), named + hint)
+
+    def test_concurrent_snapshots_all_get_their_own_name(self) -> None:
+        # The installer and a hand-run patcher can snapshot at the same moment.
+        # Choosing the name with ``Path.exists()`` was not a decision between
+        # the two processes: eight concurrent calls all picked ``.1``, all wrote
+        # ``.1.tmp``, and seven of the eight died on the other run's file --
+        # one snapshot silently lost.  The name is now claimed with an
+        # exclusive create, so the loser retries with the next number.
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "lighttpd.conf"
+            backup = Path(tmp) / "lighttpd.conf.vendor"
+            config.write_text(VENDOR)
+            # One frozen second, so only the counter can separate the names.
+            with _frozen_clock(), ThreadPoolExecutor(max_workers=8) as pool:
+                futures = [pool.submit(snapshot, config, backup) for _ in range(8)]
+                written = [future.result() for future in futures]
+            self.assertEqual(len(written), 8)
+            self.assertEqual(len({path.name for path in written}), 8,
+                             "two concurrent snapshots share a name")
+            # Retention still bounds the directory, and no half-written
+            # ``.tmp`` survives a lost race.  Two runs can prune at the same
+            # moment, so the final count is not asserted: how many survive is
+            # the retention policy's business, not this test's.
+            survivors = list(Path(tmp).glob("lighttpd.conf.vendor.*"))
+            self.assertLessEqual(len(survivors), 8)
+            self.assertEqual([item.name for item in survivors
+                              if item.name.endswith(".tmp")], [])
+            for path in survivors:
+                self.assertEqual(path.read_text(), VENDOR,
+                                 f"{path.name} is not a complete snapshot")
 
 
 class E64PhpCompatibilityTests(unittest.TestCase):

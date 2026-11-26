@@ -284,14 +284,24 @@ def _describe_snapshots(backup: Path) -> str:
     )
 
 
-def _next_snapshot_path(backup: Path) -> Path:
-    """Return an unused snapshot path that sorts after every surviving one.
+def _reserve_snapshot_path(backup: Path) -> Path:
+    """Claim an unused snapshot name that sorts after every surviving one.
 
     The UTC stamp is for the operator; the counter is what makes the *name*
     agree with write order.  It is ``max(existing) + 1`` rather than the first
     free number, so a pruned name is never handed out again while an older
     sibling still carries a higher one -- the reuse that made name ordering
     disagree with reality.
+
+    The name is claimed with ``O_CREAT | O_EXCL``, not with ``Path.exists()``.
+    Two patchers can run at once on the same unit (an install while a manual
+    ``--backup`` run is in flight); ``exists()`` only answers "was it there a
+    moment ago", so both picked ``.1``, both wrote ``.1.tmp``, and the loser
+    crashed with the other run's half-written file.  An exclusive create is a
+    decision the kernel arbitrates: the loser sees ``FileExistsError`` and
+    takes the next number.  The claim is an empty placeholder; ``snapshot()``
+    gives the name back if the copy fails, and renames the complete file over
+    it otherwise.
     """
 
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
@@ -301,19 +311,34 @@ def _next_snapshot_path(backup: Path) -> Path:
         suffix = item.name[len(prefix):]
         if suffix.isdigit():
             highest = max(highest, int(suffix))
-    candidate = backup.with_name(f"{prefix}{highest + 1}")
-    while candidate.exists():  # a concurrent run took that name
-        highest += 1
-        candidate = backup.with_name(f"{prefix}{highest + 1}")
-    return candidate
+    index = highest + 1
+    while True:
+        candidate = backup.with_name(f"{prefix}{index}")
+        try:
+            descriptor = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            # A concurrent run took that name between the scan and here.
+            index += 1
+            continue
+        os.close(descriptor)
+        return candidate
 
 
 def snapshot(config: Path, backup: Path) -> Path:
     """Copy the pre-edit config to a unique sibling of *backup*."""
 
     backup.parent.mkdir(parents=True, exist_ok=True)
-    candidate = _next_snapshot_path(backup)
-    _atomic_copy(config, candidate, preserve_times=False)
+    candidate = _reserve_snapshot_path(backup)
+    try:
+        _atomic_copy(config, candidate, preserve_times=False)
+    except BaseException:
+        # Hand the reserved name back: an empty snapshot would count against
+        # SNAPSHOT_KEEP and could prune a complete one.
+        try:
+            candidate.unlink()
+        except OSError:
+            pass
+        raise
     prune_snapshots(backup, protect=candidate)
     print(f"snapshotted pre-edit config to {candidate}")
     return candidate
