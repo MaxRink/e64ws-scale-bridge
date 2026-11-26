@@ -99,8 +99,12 @@ fi
 if [ "$FAILED" != 0 ]; then
     if [ -n "$SAFETY" ]; then
         # Undo a half-restore and keep the web server working, then tell the
-        # operator exactly what is still installed.
-        cp "$SAFETY" "$LIGHTTPD_CONF" || true
+        # operator exactly what is still installed.  The copy goes away once it
+        # is back in place, so a failed uninstall does not leave a stray copy of
+        # the lighttpd config in /tmp; if the copy back fails it is kept.
+        if cp "$SAFETY" "$LIGHTTPD_CONF"; then
+            rm -f "$SAFETY"
+        fi
         if [ -x "$LIGHTTPD" ] && "$LIGHTTPD" -t -f "$LIGHTTPD_CONF" >/dev/null 2>&1; then
             if [ -x /etc/init.d/S50lighttpd ]; then
                 /etc/init.d/S50lighttpd restart || true

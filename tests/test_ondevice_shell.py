@@ -44,7 +44,31 @@ $HTTP["scheme"] == "http" {
 
 TRUNCATED = "# force redirection from http to https\n"
 
-SETUP = textwrap.dedent("""
+# What `lighttpd -t` does with the file it is handed.  The default notices a
+# cut-off file (dangling brace) the way a real parse would; the strict one also
+# refuses a config that is not *this* unit's, which is how a restore that
+# "succeeds" can still leave a web server that will not start.
+VALIDATE_BRACES = """    open=$(tr -cd '{' < "$conf" | wc -c)
+    close=$(tr -cd '}' < "$conf" | wc -c)
+    [ "$open" = "$close" ]"""
+
+VALIDATE_REQUIRES_MARKER = VALIDATE_BRACES + """
+    grep -qF '# BEGIN E64 scale bridge Xenia HTTP' "$conf\""""
+
+# An instrumented patcher: records that the uninstaller really shells out to
+# the validating patcher (rather than copying the backup inline), then runs the
+# shipped script unchanged.
+INSTRUMENTED_PATCHER = '''#!/usr/bin/env python3
+import runpy
+import sys
+
+with open("/tmp/patcher-calls", "a", encoding="utf-8") as handle:
+    handle.write(" ".join(sys.argv[1:]) + "\\n")
+sys.argv = ["/src/ondevice/patch_lighttpd.py"] + sys.argv[1:]
+runpy.run_path("/src/ondevice/patch_lighttpd.py", run_name="__main__")
+'''
+
+SETUP_TEMPLATE = textwrap.dedent("""
     set -eu
     mkdir -p /usr/local/www/api/v2 /usr/local/www/scale /etc/init.d \\
              /db/scale-bridge /storage/scale-bridge/ondevice /etc/lighttpd
@@ -55,21 +79,28 @@ SETUP = textwrap.dedent("""
     printf '#!/bin/sh\\necho stop >> /tmp/init-calls\\n' > /etc/init.d/S95scalebridge
     printf '#!/bin/sh\\necho restart >> /tmp/init-calls\\n' > /etc/init.d/S50lighttpd
     chmod +x /etc/init.d/S95scalebridge /etc/init.d/S50lighttpd
-    # lighttpd -t stub: validates by counting braces, like a real parse would
-    # notice a cut-off file, and records that it was called.
+    # lighttpd -t stub: records that it was called, then applies the rule below.
     cat > /usr/sbin/lighttpd <<'STUB'
     #!/bin/sh
     echo "lighttpd $*" >> /tmp/lighttpd-calls
     conf=$(printf '%s\\n' "$@" | tail -1)
-    open=$(tr -cd '{' < "$conf" | wc -c)
-    close=$(tr -cd '}' < "$conf" | wc -c)
-    [ "$open" = "$close" ]
+    @@VALIDATE@@
     STUB
     chmod +x /usr/sbin/lighttpd
     # install.sh installs it 0755; mirror that so the guard matches a device.
     cp /src/ondevice/patch_lighttpd.py /storage/scale-bridge/ondevice/
     chmod 0755 /storage/scale-bridge/ondevice/patch_lighttpd.py
+    @@EXTRA@@
 """)
+
+
+def setup(validate: str = VALIDATE_BRACES, extra: str = "") -> str:
+    """Lay out a device tree; *validate* is the body of the `lighttpd -t` stub."""
+
+    return (SETUP_TEMPLATE
+            .replace("@@VALIDATE@@", textwrap.dedent(validate).strip("\n"))
+            .replace("@@EXTRA@@", textwrap.dedent(extra).strip("\n")))
+
 
 
 def docker_available() -> bool:
@@ -195,7 +226,8 @@ class UninstallShellTests(unittest.TestCase):
         if not docker_available():
             self.skipTest("docker is not available; run tools/run_shell_tests.sh")
 
-    def _run(self, *, config: str, backup: str | None) -> tuple[int, str]:
+    def _run(self, *, config: str, backup: str | None,
+             validate: str = VALIDATE_BRACES, extra: str = "") -> tuple[int, str]:
         """Lay out the device tree, run uninstall.sh, report exit code+output."""
 
         files = {
@@ -219,8 +251,16 @@ class UninstallShellTests(unittest.TestCase):
             [ -d /usr/local/www/api/v2 ] && echo "routes=kept" || echo "routes=removed"
             [ -f /tmp/lighttpd-calls ] && echo "lighttpd-test-ran=yes" || echo "lighttpd-test-ran=no"
             [ -f /tmp/init-calls ] && echo "init=$(tr '\\n' ',' < /tmp/init-calls)" || echo "init=none"
+            if [ -f /tmp/patcher-calls ]; then
+              echo "patcher=invoked"
+              echo "patcher-args=$(tr '\\n' ' ' < /tmp/patcher-calls)"
+            else
+              echo "patcher=not-invoked"
+            fi
+            # The safety copy of the running config must not outlive the run.
+            echo "safety-copies=$(ls -1 /tmp/lighttpd.conf.preuninstall.* 2>/dev/null | wc -l)"
         """)
-        script = f"""{SETUP}
+        script = f"""{setup(validate=validate, extra=extra)}
 {writes}
 echo "---uninstall---"
 set +e
@@ -314,6 +354,57 @@ set -e
         self.assertEqual(code, 0, output)
         self.assertIn("Uninstalled.", output)
         self.assertNotIn("STILL INSTALLED", output)
+
+    def test_a_config_lighttpd_rejects_is_rolled_back_and_reported(self) -> None:
+        # The restore succeeds and produces a brace-balanced vendor config, but
+        # `lighttpd -t` refuses it (a real device does this when the vendor file
+        # is not the one this unit boots with).  The safety copy taken before
+        # the restore has to put the working config back -- otherwise the
+        # uninstaller bricks the web server on its way out -- and because the
+        # exemption is then still installed, it must say so and exit non-zero.
+        code, output = self._run(config=PATCHED, backup=VENDOR,
+                                 validate=VALIDATE_REQUIRES_MARKER)
+        self.assertNotEqual(code, 0, output)
+        self.assertIn("not a valid lighttpd config after the restore", output)
+        self.assertIn("STILL INSTALLED", output)
+        self.assertNotIn("Uninstalled.", output)
+        # Rolled back, not half-restored: the exemption is byte-for-byte the
+        # one that was running before.
+        self.assertEqual(self._probe("marker").strip(), "1")
+        self.assertEqual(self._probe("code"), "kept")
+        # ... and the copy used to undo it does not stay behind in /tmp.
+        self.assertEqual(self._probe("safety-copies"), "0")
+        self.assertIn("restart", self._probe("init"))
+
+    def test_a_backup_that_itself_exempts_api_v2_is_not_reported_as_success(self) -> None:
+        # The restore can succeed and still leave the cleartext exemption
+        # installed, because the backup was taken from a patched file.  That is
+        # the branch that has to refuse to print "Uninstalled.".
+        code, output = self._run(config=PATCHED, backup=PATCHED)
+        self.assertNotEqual(code, 0, output)
+        self.assertIn("STILL INSTALLED", output)
+        self.assertIn("after the restore", output)
+        self.assertNotIn("Uninstalled.", output)
+        self.assertEqual(self._probe("marker").strip(), "1")
+        self.assertEqual(self._probe("code"), "kept")
+
+    def test_the_uninstaller_restores_through_the_patcher(self) -> None:
+        # The restore must go through the validating patcher, not an inline
+        # `cp` of the backup: an instrumented patcher at the installed path
+        # records the invocation and then runs the shipped script.
+        extra = ("cat > /storage/scale-bridge/ondevice/patch_lighttpd.py <<'E64PY'\n"
+                 + INSTRUMENTED_PATCHER
+                 + "E64PY\nchmod 0755 /storage/scale-bridge/ondevice/patch_lighttpd.py\n")
+        code, output = self._run(config=PATCHED, backup=VENDOR, extra=extra)
+        self.assertEqual(code, 0, output)
+        self.assertIn("Uninstalled.", output)
+        self.assertEqual(self._probe("patcher"), "invoked")
+        arguments = self._probe("patcher-args")
+        self.assertIn("--restore", arguments)
+        self.assertIn("--config /etc/lighttpd/lighttpd.conf", arguments)
+        self.assertIn("--backup /db/scale-bridge/lighttpd.conf.vendor", arguments)
+        # The restore really happened through it.
+        self.assertEqual(self._probe("marker").strip(), "0")
 
 
 if __name__ == "__main__":
