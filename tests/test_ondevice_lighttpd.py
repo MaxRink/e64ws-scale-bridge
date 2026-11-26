@@ -56,6 +56,12 @@ TRUNCATED = "# force redirection from http to https\n"
 # the same-second path on every run instead of whenever the machine is fast.
 FROZEN_STAMP = "20260101T000000Z"
 
+# A filesystem clock that ticks once per run: every snapshot of the run is
+# stamped with this exact st_mtime_ns, so write time cannot separate them and
+# retention has to fall back on the counter in the name.  A whole second, so a
+# filesystem that stores timestamps coarsely still keeps it as written.
+COARSE_TICK_NS = 1_700_000_000_000_000_000
+
 
 def _frozen_clock(stamp: str = FROZEN_STAMP):
     """Pin the snapshot stamp to one second, so retention is deterministic.
@@ -78,6 +84,19 @@ def _aged_snapshot(backup: Path, name: str, age_ns: int, body: str) -> Path:
     path.write_text(VENDOR + body, encoding="utf-8")
     os.utime(path, ns=(age_ns, age_ns))
     return path
+
+
+def _revision(path: Path) -> int:
+    """The ``# revision N`` marker a harness snapshot holds."""
+
+    match = re.search(r"# revision (\d+)", path.read_text(encoding="utf-8"))
+    if match is None:
+        raise AssertionError(f"{path} holds no revision marker")
+    return int(match.group(1))
+
+
+def _written_revisions(paths: list[Path]) -> list[int]:
+    return [_revision(item) for item in paths]
 
 
 def _dies_after_writing_part_of_the_file():
@@ -336,7 +355,62 @@ class SnapshotRetentionTests(unittest.TestCase):
     Sorting by name therefore deleted the newest revision.  These tests pin
     write-time order with explicit mtimes, so they do not depend on how fast
     the machine is or on the filesystem's timestamp granularity.
+
+    The exception is the coarse-clock harness: it pins every snapshot of a run
+    to a single tick on purpose, because then write time cannot separate them
+    and the counter in the name is the only thing left.  That is where the
+    suffix has to be compared as a number.
     """
+
+    def test_a_coarse_clock_keeps_the_newest_by_write_time(self) -> None:
+        # Every snapshot of the run carries the same st_mtime_ns, so retention
+        # falls back on the counter -- which used to be compared as text, where
+        # ".10" sorts before ".9".  Measured before this test existed: eleven
+        # edits kept revisions 5,6,7,8,10 and twelve kept 5,6,7,8,11, i.e. the
+        # newest revision was deleted while older ones survived.
+        #
+        # The magnitudes bracket the defect: correct up to nine by luck
+        # (single-digit suffixes), wrong from ten on, and still right at 128
+        # once the counter is compared as an int.
+        keep = 5
+        for edits in (8, 9, 10, 11, 12, 20, 128):
+            with self.subTest(edits=edits), tempfile.TemporaryDirectory() as tmp:
+                config = Path(tmp) / "lighttpd.conf"
+                backup = Path(tmp) / "lighttpd.conf.vendor"
+                for index in range(edits):
+                    config.write_text(VENDOR + f"# revision {index}\n")
+                    written = snapshot(config, backup)
+                    # The whole run lands inside one filesystem clock tick.
+                    os.utime(written, ns=(COARSE_TICK_NS, COARSE_TICK_NS))
+                survivors = sorted(Path(tmp).glob("lighttpd.conf.vendor.*"))
+                # The tick really is coarse, and really is shared by all of them.
+                self.assertEqual({item.stat().st_mtime_ns for item in survivors},
+                                 {COARSE_TICK_NS},
+                                 "the harness must leave write time undecidable")
+                self.assertEqual(len(survivors), keep)
+                # Newest by write time = the last `keep` revisions this loop
+                # wrote, which the harness knows from the loop and not from a
+                # name.
+                self.assertEqual(sorted(_written_revisions(survivors)),
+                                 list(range(edits - keep, edits)),
+                                 f"{edits} edits inside one clock tick")
+
+    def test_a_coarse_mtime_tick_orders_by_the_stamp_before_the_counter(self) -> None:
+        # vfat rounds mtime to two seconds while the name stamp is whole
+        # seconds, so one mtime tick can hold two stamps -- and the earlier
+        # second can carry the higher counter.  Ordering by the counter alone
+        # then deletes the newest snapshot and keeps the three oldest.
+        with tempfile.TemporaryDirectory() as tmp:
+            backup = Path(tmp) / "lighttpd.conf.vendor"
+            earlier, later = FROZEN_STAMP, "20260101T000001Z"
+            _aged_snapshot(backup, earlier + ".1", COARSE_TICK_NS, "# revision 1\n")
+            _aged_snapshot(backup, earlier + ".2", COARSE_TICK_NS, "# revision 2\n")
+            _aged_snapshot(backup, earlier + ".3", COARSE_TICK_NS, "# revision 3\n")
+            _aged_snapshot(backup, later + ".1", COARSE_TICK_NS, "# revision 4\n")
+            patch_lighttpd.prune_snapshots(backup, keep=2)
+            survivors = sorted(_written_revisions(Path(tmp).glob("lighttpd.conf.vendor.*")))
+            self.assertEqual(survivors, [3, 4],
+                             "the newest snapshot must not be the one deleted")
 
     def test_retention_keeps_the_newest_even_when_its_name_sorts_first(self) -> None:
         # The measured defect, with a reused <base>: revisions 2,3,4,5,7 were

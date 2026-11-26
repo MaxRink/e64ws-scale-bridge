@@ -156,7 +156,9 @@ would break the M2M path. Same text in the comment of the installed block
 
 Every edit snapshots the pre-edit file under a unique name
 (`/db/scale-bridge/lighttpd.conf.vendor.<UTC timestamp>.<n>`) before it writes,
-and keeps the newest five of them by write time.
+and keeps the newest five of them by write time. The `<n>` counter is only the
+tiebreak for a filesystem whose clock is coarser than the edit rate, and it is
+compared as a number, so `.10` is newer than `.9`.
 `/db/scale-bridge/lighttpd.conf.vendor` is the restore point and holds the
 exact bytes of the unpatched vendor config that the current block was applied
 to, so a firmware update that ships a new vendor config refreshes it on the
@@ -330,7 +332,7 @@ image.
 Off-device:
 
 ```sh
-# daemon + bridge + uninstall tests (164 tests; the 15 PHP-endpoint tests skip
+# daemon + bridge + uninstall tests (166 tests; the 15 PHP-endpoint tests skip
 # as a group when php is not on PATH, and the shell tests skip without Docker)
 python3 -m unittest discover -s tests -v
 

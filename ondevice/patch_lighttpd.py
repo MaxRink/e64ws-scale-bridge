@@ -25,7 +25,11 @@ refreshed whenever an edit starts from an unpatched file, so a firmware update
 that ships a new vendor config cannot leave ``--restore`` on a stale snapshot.
 Only the newest ``SNAPSHOT_KEEP`` snapshots are kept, and "newest" is by write
 time, not by name: the name is a whole-second stamp, so name order disagrees
-with reality as soon as two edits land in the same second.
+with reality as soon as two edits land in the same second.  On a filesystem
+whose clock is coarser than the edit rate every snapshot of a run can share one
+tick, and then write time cannot decide anything; the ``.N`` counter does, and
+it is compared as a **number** (``.10`` is newer than ``.9``) and only ever
+increases, so the tiebreak is right for any count of snapshots in one tick.
 
 ``--restore`` validates the snapshot before it copies a byte: the restore point
 must be a complete lighttpd config, not the truncated file a power loss can
@@ -179,24 +183,64 @@ def validate_config_text(text: str) -> str | None:
 SNAPSHOT_KEEP = 5
 
 
-def _snapshot_age(path: Path) -> tuple[int, str]:
-    """Sort key for the snapshots: when it was written, then its name.
+# A snapshot name is ``<backup>.<YYYYmmddTHHMMSSZ>`` (what older versions of
+# this script wrote) or ``<backup>.<YYYYmmddTHHMMSSZ>.<n>``.  Matched from the
+# end, so a backup name that itself holds digits or a stamp cannot be mistaken
+# for the snapshot's own.
+SNAPSHOT_STAMP = re.compile(r"\.(\d{8}T\d{6}Z)(?:\.(\d+))?\Z")
+
+
+def _snapshot_age(path: Path) -> tuple[int, int, int, str]:
+    """Sort key for the snapshots: write time, then the name, all as numbers.
 
     Retention used to sort by name, and the name is a whole-second UTC stamp
     with a ``.N`` collision suffix that gets *reused* once a name has been
     pruned.  Two edits in the same second therefore produced ``<base>``
     (newest) and ``<base>.2`` (older), and name order put ``<base>`` first --
     so the newest snapshot was deleted and an older one kept.  Age comes from
-    ``st_mtime_ns``, which ``snapshot()`` dates at write time.  The name only
-    breaks a tie on a filesystem with a coarser clock, which is why the
-    counter in it never goes backwards.
+    ``st_mtime_ns``, which ``snapshot()`` dates at write time, and it stays
+    primary: a snapshot written a minute later wins unless the filesystem
+    cannot tell the two apart.
+
+    The rest of the key only runs when ``st_mtime_ns`` ties, i.e. when the
+    filesystem's clock is coarser than the edit rate and every snapshot of a
+    run shares one tick.  Then the name is all the evidence left, and it is
+    compared as *numbers*, in this order:
+
+    * the stamp -- an int, ``20260101T000000Z`` -> ``20260101000000``.  Needed
+      because the name stamp is whole seconds while the stored mtime can be
+      coarser still (vfat rounds to two seconds), so one mtime tick can hold
+      two different stamps.  Comparing the counter first would then say the
+      snapshot written at 12:00:04.9 is newer than the one at 12:00:05.1 as
+      soon as the earlier second has more revisions.
+    * the counter -- an int, so ``.10`` is newer than ``.9``.  Comparing the
+      digits as text inverts every pair whose magnitudes differ, which kept
+      5,6,7,8,11 out of twelve same-tick edits: the newest revision deleted
+      while an older one survived.  It is ``max(existing) + 1`` (see
+      ``_reserve_snapshot_path()``), so it never goes backwards and always
+      agrees with write order within one stamp.
+    * the raw name -- only to keep the order *total* between two files that
+      are otherwise indistinguishable, so the pruning is deterministic and
+      independent of the order the glob returned.  It never decides which
+      snapshot is newest, because distinct names cannot tie on any of the
+      three numbers above and this only breaks a tie they leave.
+
+    A name with no stamp (anything this script did not write) sorts first and
+    is pruned first; a name with a stamp but no counter (``<base>``, written by
+    an older version) sorts before the numbered siblings of that same second.
     """
 
     try:
-        return (path.stat().st_mtime_ns, path.name)
+        mtime_ns = path.stat().st_mtime_ns
     except OSError:
         # Vanished or unreadable: treat it as the oldest so it is pruned first.
-        return (-1, path.name)
+        return (-1, -1, -1, path.name)
+    match = SNAPSHOT_STAMP.search(path.name)
+    if match is None:
+        return (mtime_ns, -1, -1, path.name)
+    stamp = int(match.group(1).replace("T", "").replace("Z", ""))
+    counter = int(match.group(2)) if match.group(2) else 0
+    return (mtime_ns, stamp, counter, path.name)
 
 
 def prune_snapshots(backup: Path, *, keep: int = SNAPSHOT_KEEP,
