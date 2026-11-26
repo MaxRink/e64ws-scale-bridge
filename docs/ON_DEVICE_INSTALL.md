@@ -90,11 +90,20 @@ finishing and then idle.
 
 Both keys are read from this file at start-up, and both have a flag that
 overrides the file: `--finishing-ms` and `--max-shot-ms`. The rule is the same
-for `timeout`/`--timeout` and `path`/`--path`: **the flag wins, the config value
-is the fallback**, and the built-in default (`3000`, `120000`, `10`,
-`/snapshot`) applies only when neither is set. Tune them in `config.json` for a
-daemon started by the init script, which passes no flags; pass the flag when
-running `scalebridged.py` by hand.
+for `timeout`/`--timeout`, `path`/`--path`, `host`/`--host`, `port`/`--port`
+and `url`/`--url`: **the flag wins, the config value is the fallback**, and the
+built-in default (`3000`, `120000`, `10`, `/snapshot`, `hds.local`, `80`)
+applies only when neither is set. Tune them in `config.json` for a daemon
+started by the init script, which passes no flags; pass the flag when running
+`scalebridged.py` by hand.
+
+Every one of them is checked by the same resolver, so a typo is one line on
+stderr and a non-zero exit, not a traceback with the daemon never started:
+`"port": "eighty"` gives `config port must be a number, not 'eighty'`, a port
+outside 1..65535 (including an explicit `--port 0`) is refused instead of
+silently replaced by the config value, and a non-string `host`/`url`/`path` is
+refused the same way. An invalid `max_shot_ms`/`finishing_ms`/`timeout` was
+already handled like that.
 
 ## What gets installed
 
@@ -103,7 +112,7 @@ running `scalebridged.py` by hand.
 | `/storage/scale-bridge/` | daemon + copied detector/parser modules | Usually (A/B); `upload_swu.php?prepare` wipes `/storage` |
 | `/db/scale-bridge/config.json` | scale address and tuning | Yes |
 | `/db/scale-bridge/shots.jsonl` | one JSON line per completed shot; rotated to `shots.jsonl.1` at 4 MiB, so at most ~8 MiB is kept | Yes |
-| `/db/scale-bridge/lighttpd.conf.vendor*` | restore point + the newest 5 pre-edit snapshots; older ones are pruned | Yes |
+| `/db/scale-bridge/lighttpd.conf.vendor*` | restore point + the newest 5 pre-edit snapshots, ordered by when they were written; older ones are pruned | Yes |
 | `/run/scale-bridge/state.json` | live state for PHP/WebUI | No (tmpfs) |
 | `/log/scalebridged.log` | daemon stdout/stderr; rotated to `.1` at 1 MiB when the init script starts it | No (rootfs) |
 | `/usr/local/www/api/v2/` | Xenia routes | No; re-run installer |
@@ -146,7 +155,8 @@ would break the M2M path. Same text in the comment of the installed block
 (`ondevice/patch_lighttpd.py`).
 
 Every edit snapshots the pre-edit file under a unique name
-(`/db/scale-bridge/lighttpd.conf.vendor.<UTC timestamp>`) before it writes.
+(`/db/scale-bridge/lighttpd.conf.vendor.<UTC timestamp>.<n>`) before it writes,
+and keeps the newest five of them by write time.
 `/db/scale-bridge/lighttpd.conf.vendor` is the restore point and holds the
 exact bytes of the unpatched vendor config that the current block was applied
 to, so a firmware update that ships a new vendor config refreshes it on the
@@ -163,7 +173,9 @@ the file must be non-empty, brace-balanced and hold at least one lighttpd
 directive. A backup that fails that check (a truncated restore point from an
 interrupted snapshot, a garbage file) is refused loudly -- exit code 5, the
 live config untouched, and the newest complete `lighttpd.conf.vendor.*`
-snapshot named so you can re-run `--backup <that file>`.
+snapshot named -- newest meaning most recently written, which is the one that
+matches the config the unit is running -- so you can re-run
+`--backup <that file>`.
 
 ## Endpoints
 
