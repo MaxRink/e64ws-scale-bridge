@@ -3,7 +3,10 @@
 These tests are deliberately cheap and text-based: they catch the two defects
 that were reported against the docs (a stale Python test count and "four
 Xenia routes" where the installer ships five) and they keep every review item
-listed with an explicit status in docs/REVIEW_FOLLOWUPS.md.
+listed with an explicit status in docs/REVIEW_FOLLOWUPS.md.  The items that
+were previously dropped without a row -- ``--restore``, a rejected action and
+the grinder's response payload -- are in ``REVIEW_ITEMS`` like any other, so
+deleting their row leaves the suite red.
 """
 
 from __future__ import annotations
@@ -25,6 +28,10 @@ REVIEW_ITEMS = (
     "--max-shot-ms",
     "--restore",
     "rejected action",
+    # The response payload was the third item dropped without a row; it is
+    # pinned by phrase here so deleting the admission from the redaction row
+    # fails this suite instead of leaving it green.
+    "response payload",
     "audit flush",
     "serving",
     "uninstall",
