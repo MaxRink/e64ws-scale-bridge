@@ -1,0 +1,57 @@
+version: 2
+
+# Dependabot covers the two dependency surfaces this repository has.
+#
+#   * requirements.txt at the root - what README.md tells a reader to install
+#     and what the suites import: websocket-client for the WSS client, and bleak
+#     for --ble, guarded by a python_version marker.
+#   * .github/workflows/ci.yml, the only workflow, which takes
+#     actions/checkout and actions/setup-python by moving major tag.
+#
+# Deliberately absent, with the reason:
+#   - docker and docker-compose: nothing here is built from a Dockerfile or a
+#     compose file.  tools/run_php_tests.sh starts the endpoint tests with an
+#     inline `docker run ... php:8.4-cli`, and a shell argument is not a
+#     manifest Dependabot reads, so that tag is maintained by hand in the
+#     script;
+#   - npm: no package.json.  The WebUI is plain PHP and the tooling is Python;
+#   - composer: ondevice/web/ ships PHP endpoints, but there is no
+#     composer.json and no vendor/ - the endpoints are standalone .php files
+#     against the device's own includes.
+#
+# Minor and patch updates are grouped so one PR is one review; a major stays
+# ungrouped and arrives as its own PR.  There is no `labels:` key, matching the
+# sibling repositories, so Dependabot's default labels apply.
+
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:15"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 5
+    groups:
+      python:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:30"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
