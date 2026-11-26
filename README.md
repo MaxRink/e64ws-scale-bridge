@@ -145,7 +145,7 @@ the assisted dial-in plugin is
 python3 -m unittest discover -s tests -v
 ```
 
-155 Python tests cover the Decent/generic parsers, shot detection, event units,
+161 Python tests cover the Decent/generic parsers, shot detection, event units,
 the WSS client's timeout/redaction paths, the Xenia emulator routes, the
 on-device daemon, the lighttpd snapshot/restore patch and these docs. Fifteen
 of them exercise the on-device Xenia endpoints, WebUI page, ESP32 ingest and

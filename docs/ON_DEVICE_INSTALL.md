@@ -318,7 +318,7 @@ image.
 Off-device:
 
 ```sh
-# daemon + bridge + uninstall tests (155 tests; the 15 PHP-endpoint tests skip
+# daemon + bridge + uninstall tests (161 tests; the 15 PHP-endpoint tests skip
 # as a group when php is not on PATH, and the shell tests skip without Docker)
 python3 -m unittest discover -s tests -v
 

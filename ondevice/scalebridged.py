@@ -555,15 +555,60 @@ def _resolve_number(cli_value: Any, config: dict[str, Any], key: str, default: A
         raise SystemExit(f"config {key} must be a number, not {value!r}") from None
 
 
+def _require_text(key: str, value: Any) -> str:
+    """Refuse a value that is not a usable string, naming the key.
+
+    Same shape as ``_resolve_number``: a config.json typo is one line on stderr
+    and a non-zero exit, never a traceback out of ``urlsplit``.
+    """
+
+    if not isinstance(value, str) or not value.strip():
+        raise SystemExit(f"config {key} must be a non-empty string, not {value!r}")
+    return value
+
+
+def _resolve_text(cli_value: Any, config: dict[str, Any], key: str, default: Any) -> str:
+    return _require_text(key, _resolve(cli_value, config, key, default))
+
+
+def _resolve_port(cli_value: Any, config: dict[str, Any], key: str = "port",
+                  default: int = 80) -> int:
+    """Resolve the scale's TCP port, refusing anything outside 1..65535.
+
+    ``--port 0`` used to be swallowed by ``args.port or ...``: an explicit zero
+    fell back to the config value (or 80) without a word.  A port that cannot
+    be connected to is a configuration error, so it is reported as one.
+    """
+
+    value = _resolve_number(cli_value, config, key, default, integer=True)
+    if not 1 <= value <= 65535:
+        raise SystemExit(
+            f"config {key} must be a port between 1 and 65535, not {value!r}"
+        )
+    return value
+
+
+def scale_url(args: argparse.Namespace, config: dict[str, Any]) -> str:
+    """Work out the scale's URL: ``url`` wins, otherwise host + port + path.
+
+    Every part goes through the resolvers above, so a bad ``port``, ``host`` or
+    ``url`` in config.json is the same clean refusal as a bad ``max_shot_ms``
+    instead of a ``ValueError``/``AttributeError`` traceback.
+    """
+
+    url = args.url if args.url is not None else config.get("url")
+    if url is not None:
+        return _require_text("url", url)
+    host = _resolve_text(args.host, config, "host", "hds.local")
+    port = _resolve_port(args.port, config)
+    path = _resolve_text(args.path, config, "path", "/snapshot")
+    return f"ws://{host}:{port}{path if path.startswith('/') else '/' + path}"
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = load_config(args.config)
-    url = args.url or config.get("url")
-    if not url:
-        host = args.host or config.get("host") or "hds.local"
-        port = args.port or int(config.get("port", 80))
-        path = _resolve(args.path, config, "path", "/snapshot")
-        url = f"ws://{host}:{port}{path if str(path).startswith('/') else '/' + str(path)}"
+    url = scale_url(args, config)
     drop_privileges(args.user)
     detector = ShotDetector(
         stable_ms=args.stable_ms,

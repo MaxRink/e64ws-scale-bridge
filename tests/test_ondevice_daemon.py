@@ -205,6 +205,55 @@ class CliConfigPrecedenceTests(unittest.TestCase):
             self._main(config, [])
         self.assertIn("max_shot_ms", str(caught.exception))
 
+    def test_a_non_numeric_config_port_is_a_clean_refusal(self) -> None:
+        # The measured defect: `int(config.get("port", 80))` sat outside the
+        # resolver, so this was a ValueError traceback and exit 1 with the
+        # daemon never started.
+        config = installer_config()
+        config["port"] = "eighty"
+        with self.assertRaises(SystemExit) as caught:
+            self._main(config, [])
+        self.assertIn("port", str(caught.exception))
+        self.assertIn("eighty", str(caught.exception))
+
+    def test_a_non_string_config_host_or_url_is_a_clean_refusal(self) -> None:
+        for key, value in (("host", ["hds.local"]), ("url", 42), ("path", 7)):
+            with self.subTest(key=key):
+                config = installer_config()
+                config[key] = value
+                with self.assertRaises(SystemExit) as caught:
+                    self._main(config, [])
+                self.assertIn(key, str(caught.exception))
+
+    def test_an_explicit_port_zero_is_refused_not_silently_ignored(self) -> None:
+        # `args.port or ...` treated 0 as "not given" and used the config (or
+        # 80) without a word.
+        config = installer_config()
+        with self.assertRaises(SystemExit) as caught:
+            self._main(config, ["--port", "0"])
+        self.assertIn("port", str(caught.exception))
+        self.assertIn("0", str(caught.exception))
+
+    def test_a_numeric_string_config_port_is_still_accepted(self) -> None:
+        # JSON authors write numbers as strings; that is not the typo this
+        # guards against.
+        config = installer_config()
+        config["port"] = "8123"
+        _, kwargs = self._main(config, [])
+        self.assertEqual(kwargs["url"], "ws://hds.local:8123/snapshot")
+
+    def test_a_config_url_wins_over_host_and_port(self) -> None:
+        config = installer_config()
+        config["url"] = "ws://scale.lan:9000/weigh"
+        _, kwargs = self._main(config, [])
+        self.assertEqual(kwargs["url"], "ws://scale.lan:9000/weigh")
+
+    def test_the_url_flag_wins_over_a_config_url(self) -> None:
+        config = installer_config()
+        config["url"] = "ws://scale.lan:9000/weigh"
+        _, kwargs = self._main(config, ["--url", "ws://hds.local/snapshot"])
+        self.assertEqual(kwargs["url"], "ws://hds.local/snapshot")
+
 
 class OnDeviceDaemonTests(unittest.TestCase):
     def test_shot_updates_state_and_history(self) -> None:
