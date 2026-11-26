@@ -105,6 +105,15 @@ silently replaced by the config value, and a non-string `host`/`url`/`path` is
 refused the same way. An invalid `max_shot_ms`/`finishing_ms`/`timeout` was
 already handled like that.
 
+A `url` is validated as well, by the same function the WebSocket client uses:
+the scheme must be `ws://` (host non-empty, port in 1..65535, a missing port
+means 80), and `wss://` is refused with the reason -- this client has no TLS
+and the scale's snapshot endpoint is a plain `ws://` LAN peer. So
+`--url ftp://hds.local/snapshot`, `--url ws://hds.local:0/snapshot`,
+`--url ws://hds.local:70000/snapshot` and `--url ws://:80/snapshot` are each
+one line on stderr and exit 1, instead of a daemon that retried the refusal
+with backoff and exited 0 after writing only `connection error` lines.
+
 ## What gets installed
 
 | Path | Purpose | Survives signed update? |
@@ -332,7 +341,7 @@ image.
 Off-device:
 
 ```sh
-# daemon + bridge + uninstall tests (167 tests; the 15 PHP-endpoint tests skip
+# daemon + bridge + uninstall tests (174 tests; the 15 PHP-endpoint tests skip
 # as a group when php is not on PATH, and the shell tests skip without Docker)
 python3 -m unittest discover -s tests -v
 

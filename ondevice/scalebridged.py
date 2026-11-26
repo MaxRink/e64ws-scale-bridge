@@ -68,6 +68,59 @@ class WebSocketError(RuntimeError):
     pass
 
 
+def _split_ws_url(url: str) -> tuple[str, int, str]:
+    """Split a plain ``ws://`` URL into host, port and path, or say why not.
+
+    The one place that decides what a usable scale URL is, so the start-up
+    check and the client cannot drift apart: ``RawWebSocket`` turns a reason
+    into a ``ValueError`` and ``scale_url()`` turns the same reason into the
+    config refusal that ``port`` and ``host`` already get.
+
+    Every case that used to be swallowed is refused here instead:
+
+    * a scheme other than ``ws`` -- ``ftp://hds.local/snapshot`` reached the
+      client, whose ``ValueError`` the reconnect loop retried forever, so the
+      daemon exited 0 having printed only retry lines;
+    * a port of 0 -- ``parts.port or 80`` replaced it with 80 without a word,
+      the same ``or``-swallowing ``args.port or ...`` did one layer up;
+    * a port outside 1..65535 or a non-numeric one -- ``parts.port`` raises
+      there, inside ``RawWebSocket``, and the retry loop swallowed it;
+    * a missing host -- ``ws://:80/x`` has none, and ``connect()`` would have
+      failed on every retry instead of once, at start-up.
+
+    ``wss://`` is refused rather than half-supported: this client has no TLS
+    (the E64 Python has no ``hashlib``, so it cannot even check the server's
+    ``Sec-WebSocket-Accept``) and the snapshot endpoint is an unauthenticated
+    LAN peer.  A missing port means 80, the documented default.
+    """
+
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError(f"it does not parse: {exc}") from None
+    scheme = parts.scheme.lower()
+    if scheme == "wss":
+        raise ValueError(
+            "wss:// needs TLS and this client has none "
+            "(the snapshot endpoint is a plain ws:// LAN peer)"
+        )
+    if scheme != "ws":
+        raise ValueError(
+            f"the scheme must be ws://, not {parts.scheme or '<missing>'}://"
+        )
+    if not parts.hostname:
+        raise ValueError("it has no host")
+    if port is None:
+        port = 80
+    elif not 1 <= port <= 65535:
+        raise ValueError(f"the port must be 1..65535, not {port}")
+    path = parts.path or "/"
+    if parts.query:
+        path += "?" + parts.query
+    return (parts.hostname, port, path)
+
+
 class RawWebSocket:
     """Minimal RFC 6455 text client for a trusted, plain ``ws://`` LAN peer.
 
@@ -77,16 +130,10 @@ class RawWebSocket:
     """
 
     def __init__(self, url: str, *, timeout: float = 10.0, max_frame: int = 1 << 20) -> None:
-        parts = urlsplit(url)
-        if parts.scheme != "ws":
-            raise ValueError("only ws:// is supported")
-        if not parts.hostname:
-            raise ValueError("URL has no host")
-        self.host = parts.hostname
-        self.port = parts.port or 80
-        self.path = parts.path or "/"
-        if parts.query:
-            self.path += "?" + parts.query
+        try:
+            self.host, self.port, self.path = _split_ws_url(url)
+        except ValueError as exc:
+            raise ValueError(f"{url!r} is not a usable scale URL: {exc}") from None
         self.timeout = timeout
         self.max_frame = max_frame
         self.sock: socket.socket | None = None
@@ -593,12 +640,23 @@ def scale_url(args: argparse.Namespace, config: dict[str, Any]) -> str:
 
     Every part goes through the resolvers above, so a bad ``port``, ``host`` or
     ``url`` in config.json is the same clean refusal as a bad ``max_shot_ms``
-    instead of a ``ValueError``/``AttributeError`` traceback.
+    instead of a ``ValueError``/``AttributeError`` traceback.  A ``url`` that
+    is a string is not usable just because it is a string: it has to be a
+    ``ws://`` URL with a host and a port in 1..65535, so ``--url ftp://...``,
+    ``--url ws://host:0/...``, ``--url ws://host:70000/...`` and
+    ``--url ws://:80/...`` are one line on stderr and a non-zero exit -- the
+    ``RawWebSocket`` refusal they used to hit was caught by ``run_forever``
+    and retried with backoff until the daemon exited 0.
     """
 
     url = args.url if args.url is not None else config.get("url")
     if url is not None:
-        return _require_text("url", url)
+        url = _require_text("url", url)
+        try:
+            _split_ws_url(url)
+        except ValueError as exc:
+            raise SystemExit(f"config url {url!r} is not usable: {exc}") from None
+        return url
     host = _resolve_text(args.host, config, "host", "hds.local")
     port = _resolve_port(args.port, config)
     path = _resolve_text(args.path, config, "path", "/snapshot")

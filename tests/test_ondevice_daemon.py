@@ -10,6 +10,8 @@ import json
 import re
 import socket
 import struct
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -253,6 +255,93 @@ class CliConfigPrecedenceTests(unittest.TestCase):
         config["url"] = "ws://scale.lan:9000/weigh"
         _, kwargs = self._main(config, ["--url", "ws://hds.local/snapshot"])
         self.assertEqual(kwargs["url"], "ws://hds.local/snapshot")
+
+    def test_a_url_in_another_scheme_is_a_clean_refusal(self) -> None:
+        # `ftp://` reached RawWebSocket, whose ValueError was caught by
+        # run_forever and retried with backoff: the daemon printed retry lines
+        # and exited 0, so a typo looked exactly like a flaky network.
+        with self.assertRaises(SystemExit) as caught:
+            self._main(installer_config(), ["--url", "ftp://hds.local/snapshot"])
+        self.assertIn("ftp://hds.local/snapshot", str(caught.exception))
+        self.assertIn("ws://", str(caught.exception))
+
+    def test_a_wss_url_is_refused_with_the_tls_reason(self) -> None:
+        # The scale's endpoint is a plain ws:// LAN peer and this client has no
+        # TLS at all, so wss:// is refused instead of half-supported.
+        with self.assertRaises(SystemExit) as caught:
+            self._main(installer_config(), ["--url", "wss://hds.local/snapshot"])
+        self.assertIn("wss://", str(caught.exception))
+        self.assertIn("TLS", str(caught.exception))
+
+    def test_a_zero_port_in_the_url_is_refused(self) -> None:
+        # `parts.port or 80` swallowed an explicit 0 one layer below main(),
+        # exactly like `args.port or ...` did on the line above.
+        with self.assertRaises(SystemExit) as caught:
+            self._main(installer_config(), ["--url", "ws://hds.local:0/x"])
+        self.assertIn("ws://hds.local:0/x", str(caught.exception))
+        self.assertIn("1..65535", str(caught.exception))
+
+    def test_a_url_port_above_65535_is_refused(self) -> None:
+        # urlsplit raises on the `.port` access, inside RawWebSocket, and the
+        # retry loop swallowed it.
+        with self.assertRaises(SystemExit) as caught:
+            self._main(installer_config(), ["--url", "ws://hds.local:70000/x"])
+        self.assertIn("ws://hds.local:70000/x", str(caught.exception))
+        self.assertIn("65535", str(caught.exception))
+
+    def test_a_url_without_a_host_is_refused(self) -> None:
+        with self.assertRaises(SystemExit) as caught:
+            self._main(installer_config(), ["--url", "ws://:80/x"])
+        self.assertIn("ws://:80/x", str(caught.exception))
+        self.assertIn("host", str(caught.exception))
+
+    def test_a_valid_ws_url_is_used_exactly_as_given(self) -> None:
+        # The refusals above must not refuse a working URL: the default port,
+        # an explicit port, a path and a query all still pass through.
+        for url in ("ws://hds.local/snapshot",
+                    "ws://hds.local:8123/weigh",
+                    "ws://scale.lan:9000/snapshot?token=abc",
+                    "ws://[::1]:8080/snapshot"):
+            with self.subTest(url=url):
+                _, kwargs = self._main(installer_config(), ["--url", url])
+                self.assertEqual(kwargs["url"], url)
+
+
+class UrlValidationCliTests(unittest.TestCase):
+    """A typo'd ``--url`` is one line on stderr and a non-zero exit.
+
+    ``CliConfigPrecedenceTests`` shows the refusal happens before the daemon is
+    built; this runs the real CLI, because the defect was the *exit status* and
+    the retry loop, which a mocked ``ScaleDaemon`` cannot show.  ``--duration
+    1`` is passed so a regression that retries instead of refusing exits 0
+    after a second instead of hanging the test.
+    """
+
+    BAD_URLS = (
+        ("ftp://hds.local/snapshot", "the scheme must be ws://"),
+        ("ws://hds.local:0/x", "the port must be 1..65535"),
+        ("ws://hds.local:70000/x", "Port out of range"),
+        ("ws://:80/x", "it has no host"),
+        ("wss://hds.local/x", "wss:// needs TLS"),
+    )
+
+    def test_a_typo_in_url_exits_non_zero_with_one_line_of_stderr(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            for url, reason in self.BAD_URLS:
+                with self.subTest(url=url):
+                    result = subprocess.run(
+                        [sys.executable, str(REPO / "ondevice" / "scalebridged.py"),
+                         "--config", str(Path(tmp) / "absent.json"),
+                         "--state", str(Path(tmp) / "state.json"), "--no-shots",
+                         "--duration", "1", "--url", url],
+                        capture_output=True, text=True, timeout=120,
+                    )
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(result.stderr.count("\n"), 1, result.stderr)
+                    self.assertIn(url, result.stderr)
+                    self.assertIn(reason, result.stderr)
+                    self.assertNotIn("connection error", result.stderr)
 
 
 class OnDeviceDaemonTests(unittest.TestCase):
