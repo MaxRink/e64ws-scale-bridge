@@ -39,6 +39,12 @@ DEFAULT_STATE = "/run/scale-bridge/state.json"
 DEFAULT_SHOTS = "/db/scale-bridge/shots.jsonl"
 DEFAULT_CONFIG = "/db/scale-bridge/config.json"
 SCHEMA = 1
+# /db survives signed updates, so the shot history grows for the life of the
+# unit: one JSON line per shot is ~230 bytes, or ~12.7 MB/year at four shots a
+# day.  Rotate at 4 MiB and keep one previous file, so the log is bounded at
+# ~8 MiB and the newest shots are always the ones on disk.
+SHOTS_MAX_BYTES = 4 << 20
+SHOTS_KEEP = 1
 
 
 def now_ms() -> int:
@@ -62,6 +68,59 @@ class WebSocketError(RuntimeError):
     pass
 
 
+def _split_ws_url(url: str) -> tuple[str, int, str]:
+    """Split a plain ``ws://`` URL into host, port and path, or say why not.
+
+    The one place that decides what a usable scale URL is, so the start-up
+    check and the client cannot drift apart: ``RawWebSocket`` turns a reason
+    into a ``ValueError`` and ``scale_url()`` turns the same reason into the
+    config refusal that ``port`` and ``host`` already get.
+
+    Every case that used to be swallowed is refused here instead:
+
+    * a scheme other than ``ws`` -- ``ftp://hds.local/snapshot`` reached the
+      client, whose ``ValueError`` the reconnect loop retried forever, so the
+      daemon exited 0 having printed only retry lines;
+    * a port of 0 -- ``parts.port or 80`` replaced it with 80 without a word,
+      the same ``or``-swallowing ``args.port or ...`` did one layer up;
+    * a port outside 1..65535 or a non-numeric one -- ``parts.port`` raises
+      there, inside ``RawWebSocket``, and the retry loop swallowed it;
+    * a missing host -- ``ws://:80/x`` has none, and ``connect()`` would have
+      failed on every retry instead of once, at start-up.
+
+    ``wss://`` is refused rather than half-supported: this client has no TLS
+    (the E64 Python has no ``hashlib``, so it cannot even check the server's
+    ``Sec-WebSocket-Accept``) and the snapshot endpoint is an unauthenticated
+    LAN peer.  A missing port means 80, the documented default.
+    """
+
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError(f"it does not parse: {exc}") from None
+    scheme = parts.scheme.lower()
+    if scheme == "wss":
+        raise ValueError(
+            "wss:// needs TLS and this client has none "
+            "(the snapshot endpoint is a plain ws:// LAN peer)"
+        )
+    if scheme != "ws":
+        raise ValueError(
+            f"the scheme must be ws://, not {parts.scheme or '<missing>'}://"
+        )
+    if not parts.hostname:
+        raise ValueError("it has no host")
+    if port is None:
+        port = 80
+    elif not 1 <= port <= 65535:
+        raise ValueError(f"the port must be 1..65535, not {port}")
+    path = parts.path or "/"
+    if parts.query:
+        path += "?" + parts.query
+    return (parts.hostname, port, path)
+
+
 class RawWebSocket:
     """Minimal RFC 6455 text client for a trusted, plain ``ws://`` LAN peer.
 
@@ -71,16 +130,10 @@ class RawWebSocket:
     """
 
     def __init__(self, url: str, *, timeout: float = 10.0, max_frame: int = 1 << 20) -> None:
-        parts = urlsplit(url)
-        if parts.scheme != "ws":
-            raise ValueError("only ws:// is supported")
-        if not parts.hostname:
-            raise ValueError("URL has no host")
-        self.host = parts.hostname
-        self.port = parts.port or 80
-        self.path = parts.path or "/"
-        if parts.query:
-            self.path += "?" + parts.query
+        try:
+            self.host, self.port, self.path = _split_ws_url(url)
+        except ValueError as exc:
+            raise ValueError(f"{url!r} is not a usable scale URL: {exc}") from None
         self.timeout = timeout
         self.max_frame = max_frame
         self.sock: socket.socket | None = None
@@ -213,6 +266,7 @@ class ScaleDaemon:
         detector: ShotDetector | None = None,
         finishing_ms: int = 3000,
         timeout: float = 10.0,
+        heartbeat_s: float = 1.0,
         verbose: bool = False,
     ) -> None:
         self.url = url
@@ -221,9 +275,11 @@ class ScaleDaemon:
         self.detector = detector or ShotDetector()
         self.finishing_ms = max(0, int(finishing_ms))
         self.timeout = timeout
+        self.heartbeat_s = max(0.05, float(heartbeat_s))
         self.verbose = verbose
         self.stop_event = threading.Event()
         self._lock = threading.Lock()
+        self._write_lock = threading.Lock()
         self._state: dict[str, Any] = {
             "schema": SCHEMA,
             "source": url,
@@ -262,7 +318,10 @@ class ScaleDaemon:
             value = dict(self._state)
         value["updated_ms"] = now_ms()
         try:
-            atomic_json(self.state_path, value)
+            # Serialised: the heartbeat thread and the reader both write, and
+            # atomic_json uses one temp name per target.
+            with self._write_lock:
+                atomic_json(self.state_path, value)
             self._last_write = now
         except OSError as exc:
             self.log(f"state write failed: {exc}")
@@ -272,11 +331,28 @@ class ScaleDaemon:
             self._state.update(fields)
         self._write_state()
 
+    def _rotate_shots(self) -> None:
+        """Keep the shot log bounded: shots.jsonl -> .1, oldest discarded."""
+
+        if self.shots_path is None:
+            return
+        try:
+            if self.shots_path.stat().st_size < SHOTS_MAX_BYTES:
+                return
+        except OSError:
+            return
+        for index in range(SHOTS_KEEP, 0, -1):
+            source = self.shots_path if index == 1 else Path(f"{self.shots_path}.{index - 1}")
+            if source.exists():
+                os.replace(source, Path(f"{self.shots_path}.{index}"))
+        self.log(f"rotated {self.shots_path} at {SHOTS_MAX_BYTES} bytes")
+
     def _append_shot(self, shot: dict[str, Any]) -> None:
         if self.shots_path is None:
             return
         try:
             self.shots_path.parent.mkdir(parents=True, exist_ok=True)
+            self._rotate_shots()
             with open(self.shots_path, "a", encoding="utf-8") as handle:
                 handle.write(json.dumps(shot, separators=(",", ":"), sort_keys=True) + "\n")
         except OSError as exc:
@@ -291,6 +367,7 @@ class ScaleDaemon:
             min_duration_ms=self.detector.min_duration_ms,
             valid_min_ms=self.detector.valid_min_ms,
             drop_threshold_g=self.detector.drop_threshold_g,
+            max_shot_ms=self.detector.max_shot_ms,
         )
 
     def feed(self, grams: float, milliseconds: float) -> dict[str, Any] | None:
@@ -383,25 +460,59 @@ class ScaleDaemon:
                 self._state["connected"] = False
             self._write_state(force=True)
 
+    def _connection_lost(self, exc: BaseException) -> None:
+        """Reset to idle after a dropped stream.
+
+        A shot that was in flight is discarded, not reported: its samples are
+        incomplete and the scale clock may restart.  Resetting the detector
+        keeps the state file consistent with it (idle and nothing active)
+        instead of showing idle while a stale shot is still open.
+        """
+
+        self._reset_detector()
+        self._last_sample = None
+        self._flow_g_s = 0.0
+        with self._lock:
+            self._state["connected"] = False
+            self._state["error"] = str(exc)
+            self._state["phase"] = "idle"
+            self._state["ma_status"] = 1
+            self._state["extraction_status"] = 0
+            self._state["active_ms"] = 0
+            self._state["flow_g_s"] = 0.0
+        self._write_state(force=True)
+        self.log(f"connection error: {exc}")
+
+    def _heartbeat(self) -> None:
+        """Keep ``updated_ms`` fresh while the daemon is alive.
+
+        The PHP layer treats an old state file as "no daemon", so the file has
+        to be a liveness signal and not only an activity log: a healthy daemon
+        that is merely waiting -- a silent scale, a reconnect backoff of up to
+        30 s -- writes nothing else, and would otherwise be reported as dead.
+        """
+
+        while not self.stop_event.wait(self.heartbeat_s):
+            self._write_state(force=True)
+
     def run_forever(self) -> None:
         backoff = 1.0
-        while not self.stop_event.is_set():
-            try:
-                self._read_once()
-                backoff = 1.0
-            except (OSError, WebSocketError, OpenScaleProtocolError, ValueError) as exc:
-                if self.stop_event.is_set():
-                    break
-                with self._lock:
-                    self._state["connected"] = False
-                    self._state["error"] = str(exc)
-                    self._state["phase"] = "idle"
-                    self._state["ma_status"] = 1
-                    self._state["extraction_status"] = 0
-                self._write_state(force=True)
-                self.log(f"connection error: {exc}")
-                self.stop_event.wait(backoff)
-                backoff = min(backoff * 2, 30.0)
+        beater = threading.Thread(target=self._heartbeat, name="scale-heartbeat",
+                                  daemon=True)
+        beater.start()
+        try:
+            while not self.stop_event.is_set():
+                try:
+                    self._read_once()
+                    backoff = 1.0
+                except (OSError, WebSocketError, OpenScaleProtocolError, ValueError) as exc:
+                    if self.stop_event.is_set():
+                        break
+                    self._connection_lost(exc)
+                    self.stop_event.wait(backoff)
+                    backoff = min(backoff * 2, 30.0)
+        finally:
+            beater.join(timeout=max(1.0, self.heartbeat_s * 2))
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -428,15 +539,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--url", help="ws://host[:port]/snapshot (overrides config)")
     parser.add_argument("--host")
     parser.add_argument("--port", type=int)
-    parser.add_argument("--path", default="/snapshot")
+    # Every option that also exists in config.json defaults to None so that
+    # "was it given on the command line?" can be answered.  A truthy argparse
+    # default silently wins over (or, worse, loses to) the config depending on
+    # the order of the two lookups; see _resolve().
+    parser.add_argument("--path", help="endpoint path (default /snapshot)")
     parser.add_argument("--state", default=os.environ.get("SCALE_BRIDGE_STATE", DEFAULT_STATE))
     parser.add_argument("--shots", default=os.environ.get("SCALE_BRIDGE_SHOTS", DEFAULT_SHOTS))
     parser.add_argument("--no-shots", action="store_true", help="do not persist shot history")
-    parser.add_argument("--finishing-ms", type=int, default=3000)
-    parser.add_argument("--timeout", type=float, default=10.0)
+    parser.add_argument("--finishing-ms", type=int,
+                        help="how long /api/v2/mako reports finishing (default 3000)")
+    parser.add_argument("--timeout", type=float, help="socket timeout in seconds (default 10)")
     parser.add_argument("--stable-ms", type=float, default=1000.0)
     parser.add_argument("--min-duration-ms", type=float, default=3000.0)
     parser.add_argument("--valid-min-ms", type=float, default=15000.0)
+    parser.add_argument("--max-shot-ms", type=float,
+                        help="close an active shot as invalid (timeout) after this long "
+                             "(default 120000)")
     parser.add_argument("--once", action="store_true", help="exit after the first shot")
     parser.add_argument("--duration", type=float, default=0.0, help="exit after N seconds")
     parser.add_argument("--user", default=os.environ.get("SCALE_BRIDGE_USER", ""),
@@ -458,28 +577,111 @@ def drop_privileges(user: str) -> None:
     os.setuid(entry.pw_uid)
 
 
+def _resolve(cli_value: Any, config: dict[str, Any], key: str, default: Any) -> Any:
+    """Resolve one tunable: the command line wins, the config is the fallback.
+
+    Both sources are consulted in the same order for every option, so the
+    documented precedence ("the flag overrides the config value") holds for
+    each one.  ``load_config`` has already rejected a non-object config.
+    """
+
+    if cli_value is not None:
+        return cli_value
+    value = config.get(key, default)
+    if value is None or isinstance(value, bool):
+        raise SystemExit(f"config {key} must be a number or a string, not {value!r}")
+    return value
+
+
+def _resolve_number(cli_value: Any, config: dict[str, Any], key: str, default: Any,
+                    *, integer: bool = False) -> Any:
+    value = _resolve(cli_value, config, key, default)
+    try:
+        return int(value) if integer else float(value)
+    except (TypeError, ValueError):
+        raise SystemExit(f"config {key} must be a number, not {value!r}") from None
+
+
+def _require_text(key: str, value: Any) -> str:
+    """Refuse a value that is not a usable string, naming the key.
+
+    Same shape as ``_resolve_number``: a config.json typo is one line on stderr
+    and a non-zero exit, never a traceback out of ``urlsplit``.
+    """
+
+    if not isinstance(value, str) or not value.strip():
+        raise SystemExit(f"config {key} must be a non-empty string, not {value!r}")
+    return value
+
+
+def _resolve_text(cli_value: Any, config: dict[str, Any], key: str, default: Any) -> str:
+    return _require_text(key, _resolve(cli_value, config, key, default))
+
+
+def _resolve_port(cli_value: Any, config: dict[str, Any], key: str = "port",
+                  default: int = 80) -> int:
+    """Resolve the scale's TCP port, refusing anything outside 1..65535.
+
+    ``--port 0`` used to be swallowed by ``args.port or ...``: an explicit zero
+    fell back to the config value (or 80) without a word.  A port that cannot
+    be connected to is a configuration error, so it is reported as one.
+    """
+
+    value = _resolve_number(cli_value, config, key, default, integer=True)
+    if not 1 <= value <= 65535:
+        raise SystemExit(
+            f"config {key} must be a port between 1 and 65535, not {value!r}"
+        )
+    return value
+
+
+def scale_url(args: argparse.Namespace, config: dict[str, Any]) -> str:
+    """Work out the scale's URL: ``url`` wins, otherwise host + port + path.
+
+    Every part goes through the resolvers above, so a bad ``port``, ``host`` or
+    ``url`` in config.json is the same clean refusal as a bad ``max_shot_ms``
+    instead of a ``ValueError``/``AttributeError`` traceback.  A ``url`` that
+    is a string is not usable just because it is a string: it has to be a
+    ``ws://`` URL with a host and a port in 1..65535, so ``--url ftp://...``,
+    ``--url ws://host:0/...``, ``--url ws://host:70000/...`` and
+    ``--url ws://:80/...`` are one line on stderr and a non-zero exit -- the
+    ``RawWebSocket`` refusal they used to hit was caught by ``run_forever``
+    and retried with backoff until the daemon exited 0.
+    """
+
+    url = args.url if args.url is not None else config.get("url")
+    if url is not None:
+        url = _require_text("url", url)
+        try:
+            _split_ws_url(url)
+        except ValueError as exc:
+            raise SystemExit(f"config url {url!r} is not usable: {exc}") from None
+        return url
+    host = _resolve_text(args.host, config, "host", "hds.local")
+    port = _resolve_port(args.port, config)
+    path = _resolve_text(args.path, config, "path", "/snapshot")
+    return f"ws://{host}:{port}{path if path.startswith('/') else '/' + path}"
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = load_config(args.config)
-    url = args.url or config.get("url")
-    if not url:
-        host = args.host or config.get("host") or "hds.local"
-        port = args.port or int(config.get("port", 80))
-        path = args.path or config.get("path", "/snapshot")
-        url = f"ws://{host}:{port}{path if str(path).startswith('/') else '/' + str(path)}"
+    url = scale_url(args, config)
     drop_privileges(args.user)
     detector = ShotDetector(
         stable_ms=args.stable_ms,
         min_duration_ms=args.min_duration_ms,
         valid_min_ms=args.valid_min_ms,
+        max_shot_ms=_resolve_number(args.max_shot_ms, config, "max_shot_ms", 120_000.0),
     )
     daemon = ScaleDaemon(
         url,
         state_path=args.state,
         shots_path=None if args.no_shots else args.shots,
         detector=detector,
-        finishing_ms=args.finishing_ms or int(config.get("finishing_ms", 3000)),
-        timeout=args.timeout or float(config.get("timeout", 10.0)),
+        finishing_ms=_resolve_number(args.finishing_ms, config, "finishing_ms", 3000,
+                                     integer=True),
+        timeout=_resolve_number(args.timeout, config, "timeout", 10.0),
         verbose=args.verbose,
     )
 

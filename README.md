@@ -38,7 +38,13 @@ python3 tools/scale_bridge.py --openscale hds.local \
 
 `--allow-no-password` is the explicit FW-01 workaround for an owner-controlled
 unit with no Owner password. `--apply` changes the grinder and requires `--yes`.
-The bridge prints the event by default. Tokens and passwords are never printed.
+The bridge prints the event by default, before any write, and prints the
+grinder's response afterwards. A failed send therefore still records the event
+it attempted. A response with `success: false` is a *refusal*: the reason is
+printed to stderr and the command exits 3, so a script can tell a refused event
+from a delivered one (exit 2 is a transport or configuration error). Tokens and
+passwords are never printed -- including inside the grinder's own response
+payload, which is redacted before it is printed.
 
 Read-only preflight (no scale source and no `AddBrewEvent`):
 
@@ -56,7 +62,11 @@ scale sample -> shot detector -> AddBrewEvent data -> E64 WSS
 The detector needs a short stable baseline, starts on a rise above
 `--start-threshold-g`, ends on a stable window or cup removal, and marks the
 shot valid only at `>15 s` (the documented Sync window). The event uses
-milliseconds and milligrams.
+milliseconds and milligrams. A shot that never settles is closed at
+`--max-shot-ms` (default 120 s) as `validity: false` / `reason: "timeout"`
+instead of staying active forever. The idle baseline re-seeds when the reading
+settles at a new level, so removing the cup after a shot does not disarm the
+next one.
 
 ## Supported inputs
 
@@ -95,7 +105,7 @@ See [docs/ESP32_SCALE.md](docs/ESP32_SCALE.md), [docs/STOCK_OPTIONS.md](docs/STO
 
 The WiFi bridge can run **on the grinder itself** on a rooted unit. A
 dependency-free daemon reads `ws://<scale>/snapshot`, detects a shot, and
-writes live state. PHP serves the four Xenia routes from the grinder's own web
+writes live state. PHP serves the five Xenia routes from the grinder's own web
 root, so the E64 M2M client can point at `127.0.0.1` or the grinder's LAN
 address. The vendor HMI is not patched; the stock M2M screen is the display.
 
@@ -110,7 +120,11 @@ vi /db/scale-bridge/config.json
 This path is rooted-stock, not stock no-root, and it does **not** add BLE to
 the E64. The installer adds a narrow lighttpd exception for `/api/v2/` because
 the E64 Xenia client is HTTP-only while the vendor web server redirects HTTP to
-HTTPS. The built-in HMI already has a Xenia Diagnosis screen; the bridge feeds
+HTTPS. That exception is plain HTTP, so the five local Xenia routes — including
+the `POST /api/v2/brewratio` write and the `X-Scale-Token` header on
+`/api/v2/ingest` — cross the LAN in cleartext. That is acceptable only on a
+trusted, isolated LAN: do not expose port 80 to the internet or to an untrusted
+network. The built-in HMI already has a Xenia Diagnosis screen; the bridge feeds
 its Output Amount (live grams), Flow Rate, Real Extraction Time and Machine
 Status fields without patching QML. GBS consumption of the Xenia extraction
 time is still the physical A/B gate.
@@ -131,11 +145,15 @@ the assisted dial-in plugin is
 python3 -m unittest discover -s tests -v
 ```
 
-61 Python tests cover the Decent/generic parsers, shot detection, event units,
-the Xenia emulator routes, the on-device daemon and the lighttpd patch. Eleven
-PHP 8.4 tests cover the on-device Xenia endpoints, WebUI page, ESP32 ingest and
-state freshness (`./tools/run_php_tests.sh`). The
-bridge was also exercised against the QEMU E64: an
+174 Python tests cover the Decent/generic parsers, shot detection, event units,
+the WSS client's timeout/redaction paths, the Xenia emulator routes, the
+on-device daemon, the lighttpd snapshot/restore patch and these docs. Fifteen
+of them exercise the on-device Xenia endpoints, WebUI page, ESP32 ingest and
+state freshness; they skip as a group when `php` is not on `PATH`. A further
+set drives `install.sh`, `uninstall.sh` and the init script for real inside a
+container and skips when Docker is unavailable. `./tools/run_php_tests.sh` runs
+the fifteen against PHP 8.4 in Docker and
+`python3 -m unittest tests.test_ondevice_shell` runs the shell suite. The bridge was also exercised against the QEMU E64: an
 18 g / 24.6 s replay produced `brewTimeMs=24600`, `brewWeightMg=18000`,
 `validity=true`, and `AddBrewEvent` returned `{"success": true}` in development
 mode.
@@ -147,5 +165,9 @@ mode.
   physical check was transport/login-gate plus a read-only state capture.
 - Stock grinder control is gated; see the stock options.
 - The Xenia emulator is a protocol fixture, not a coffee-machine replacement.
+- Known review gaps (token refresh, TLS pinning, WSS reconnect, tare, the
+  dropout event path) are listed with their status in
+  [docs/REVIEW_FOLLOWUPS.md](docs/REVIEW_FOLLOWUPS.md); they are not silently
+  dropped.
 
 License: GPL-3.0-or-later. See [LICENSE](LICENSE).

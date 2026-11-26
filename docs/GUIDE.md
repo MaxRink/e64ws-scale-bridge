@@ -64,7 +64,22 @@ python3 tools/scale_bridge.py --openscale hds.local \
 > [LIVE_VALIDATION.md](LIVE_VALIDATION.md).
 
 If you have a token already, pass `--token` and `--wss-port 9997`. Do not put a
-token in shell history. The event is printed before it is sent.
+token in shell history. The event is printed and flushed before it is sent, so
+a failed send still leaves the audit line on stdout. With `--apply` the
+grinder's response is printed afterwards as a second document (`--json`) or as
+the `grinder:` line.
+
+The client carries the token in the WSS URL query string, so the token comes
+back from outside the process. A refused handshake raises with the peer's
+headers and response body, and a grinder or proxy that echoes the Request-URI
+in a 403 body echoes `?token=...` with it. (websocket-client does not quote the
+URL itself on a failed handshake; the echo in the *body* is the real leak
+vector, which is why redaction cannot be limited to messages this tool writes.)
+Every message and the grinder's response payload are therefore redacted before
+they are printed -- the token literal, `token=`/`access_token=` query values
+(everything after the key, so a token containing `&` is not half redacted) and
+any `Authorization` value, `Bearer` or not -- and the exception chain is cut so
+the unredacted text cannot resurface in a traceback.
 
 Read-only preflight before a write path:
 
@@ -92,9 +107,27 @@ for the stock path. The E64 WSS path above is separate and development-gated.
 | `--min-duration-ms` | 3000 | minimum detector window |
 | `--valid-min-ms` | 15000 | Sync validity threshold |
 | `--drop-threshold-g` | 2.0 | cup-removal drop |
+| `--max-shot-ms` | 120000 | hard bound; a longer active shot closes as `timeout` |
 
 The detector never guesses a stable baseline from a rising trend. It updates
-the baseline only while the reading is within the stability tolerance.
+the baseline only while the reading is within the stability tolerance, and
+re-seeds it when the idle reading settles at a new level (the cup removed after
+a shot, a drip tray, a re-tare). Without that re-seed the idle window would stay
+frozen on the old level and the next shot would never be detected.
+
+`--max-shot-ms` is a hard bound on an active shot. A reading that drifts and
+never meets the `--stability-g` finish window (a cup that keeps moving, a stuck
+sensor) would otherwise stay active forever and hold the on-device status in
+serving. At the bound the shot is closed with `validity: false` and
+`reason: "timeout"`, so the event is still reported and the next shot can start.
+The bound becomes `REAL_EXTRACTION_TIME_MS` for the `finishing_ms` window, so a
+timeout shot shows up in Xenia as a long extraction with `validity: false`; see
+[REVIEW_FOLLOWUPS.md](REVIEW_FOLLOWUPS.md).
+
+On the device the same three numbers come from `/db/scale-bridge/config.json`
+(`max_shot_ms`, `finishing_ms`, `timeout`) and the flags above override the
+file. Flags win, config is the fallback; see
+[ON_DEVICE_INSTALL.md](ON_DEVICE_INSTALL.md).
 
 ## 5. Replay and troubleshooting
 
@@ -105,6 +138,12 @@ python3 tools/scale_bridge.py --replay examples/shot.jsonl --once --json
 - No event printed: the sample rate is too low or the baseline never settled.
 - Event is `validity: false`: the detected duration is under 15 s.
 - `server closed the connection` on stock: expected; `AddBrewEvent` is dev-only.
+- `the grinder refused AddBrewEvent: ...` (exit 3): the event was sent and the
+  grinder declined it; the reason is on stderr. Exit 2 means it was never
+  delivered. Stock firmware refuses `AddBrewEvent` (dev gated).
+- `no WSS response from <host> within N s` (exit 2): the socket went silent for
+  the whole `--timeout` budget. The client closes it and exits 2 instead of
+  raising a traceback; run the command again to reconnect.
 - TLS error: the vendor certificate is self-signed; use `--insecure` only on a
   trusted local network, or provide `--ca-file`.
 - BLE import error: install `bleak`; BLE is not needed for replay or Wi-Fi.

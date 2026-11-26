@@ -23,7 +23,7 @@ $last = is_array($state['last_shot'] ?? null) ? $state['last_shot'] : null;
 $connected = (bool) ($state['connected'] ?? false);
 $phase = (string) ($state['phase'] ?? 'idle');
 $updated = (int) ($state['updated_ms'] ?? 0);
-$age = $updated > 0 ? max(0, scale_bridge_now_ms() - $updated) : null;
+$age = $updated > 0 ? scale_bridge_age_ms($updated, scale_bridge_now_ms()) : null;
 
 function h(string $value): string
 {

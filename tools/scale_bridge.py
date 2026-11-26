@@ -73,6 +73,40 @@ def _e64_client():
         from e64ws_client import login, login_no_password, run_request
     return login, login_no_password, run_request
 
+
+def _redact(value: object, token: str) -> str:
+    """Redact through the WSS client's one implementation (lazily imported)."""
+
+    try:
+        from tools.e64ws_client import redact
+    except ModuleNotFoundError:  # pragma: no cover - direct script execution
+        from e64ws_client import redact
+    return redact(value, token)
+
+
+REJECTED_EXIT = 3
+
+
+def rejection_reason(response: Mapping[str, Any]) -> str:
+    """Return the grinder's reason when it refused the action, else ``""``.
+
+    An accepted action answers ``{"success": true}``.  An explicit
+    ``success: false`` is a *refusal* -- not a transport error -- and it used
+    to be indistinguishable from acceptance: the CLI exited 0, so automation
+    and the audit line could not tell "sent and refused" from "sent and
+    accepted".  Only an explicit ``false`` counts, so a payload that simply
+    does not carry the field keeps the old behaviour.
+    """
+
+    if not isinstance(response, Mapping) or response.get("success") is not False:
+        return ""
+    for key in ("error", "message", "reason", "detail"):
+        value = response.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return "the grinder gave no reason"
+
+
 DECENT_SERVICE = "0000fff0-0000-1000-8000-00805f9b34fb"
 DECENT_NOTIFY = "0000fff4-0000-1000-8000-00805f9b34fb"
 DECENT_WRITE = "000036f5-0000-1000-8000-00805f9b34fb"
@@ -143,6 +177,7 @@ class ShotDetector:
         min_duration_ms: float = 3000.0,
         valid_min_ms: float = 15000.0,
         drop_threshold_g: float = 2.0,
+        max_shot_ms: float = 120_000.0,
     ) -> None:
         if baseline_samples < 1:
             raise ValueError("baseline_samples must be positive")
@@ -152,6 +187,8 @@ class ShotDetector:
             raise ValueError("stability_g must not be negative")
         if stable_ms <= 0 or min_duration_ms <= 0 or valid_min_ms <= 0:
             raise ValueError("time windows must be positive")
+        if not math.isfinite(max_shot_ms) or max_shot_ms <= 0:
+            raise ValueError("max_shot_ms must be a positive number of milliseconds")
         self.baseline_samples = baseline_samples
         self.start_threshold_g = start_threshold_g
         self.stability_g = stability_g
@@ -159,7 +196,9 @@ class ShotDetector:
         self.min_duration_ms = min_duration_ms
         self.valid_min_ms = valid_min_ms
         self.drop_threshold_g = drop_threshold_g
+        self.max_shot_ms = max_shot_ms
         self._idle: list[ScaleSample] = []
+        self._drift: list[ScaleSample] = []
         self._baseline: float | None = None
         self._last_ms: float | None = None
         self._active = False
@@ -180,15 +219,9 @@ class ShotDetector:
 
         return self._start_ms
 
-    def _idle_baseline(self) -> float:
-        if self._baseline is None:
-            if not self._idle:
-                raise ValueError("no baseline sample")
-            self._baseline = statistics.median(s.grams for s in self._idle)
-        return self._baseline
-
     def _reset_after_shot(self) -> None:
         self._idle = []
+        self._drift = []
         self._baseline = None
         self._active = False
         self._samples = []
@@ -196,9 +229,17 @@ class ShotDetector:
         self._start_g = 0.0
         self._peak_g = 0.0
 
-    def _finish(self, end_ms: float, mass_g: float, reason: str) -> Shot:
+    def _finish(
+        self,
+        end_ms: float,
+        mass_g: float,
+        reason: str,
+        *,
+        valid: bool | None = None,
+    ) -> Shot:
         duration = end_ms - self._start_ms
-        valid = duration >= self.valid_min_ms and mass_g > 0
+        if valid is None:
+            valid = duration >= self.valid_min_ms and mass_g > 0
         shot = Shot(
             start_ms=self._start_ms,
             end_ms=end_ms,
@@ -233,15 +274,33 @@ class ShotDetector:
                 self._start_g = self._baseline
                 self._samples = list(self._idle)
                 self._peak_g = sample.grams
+                self._drift = []
                 return None
             # Track slow drift only while the reading is genuinely stable.  A
             # continuously rising pre-infusion must not drag the baseline up
             # with it, which would hide the shot start.
             if abs(sample.grams - self._baseline) <= self.stability_g:
+                self._drift = []
                 self._idle.append(sample)
                 if len(self._idle) > self.baseline_samples:
                     self._idle.pop(0)
                 self._baseline = statistics.median(s.grams for s in self._idle)
+                return None
+            # Outside the window: the scale may simply have settled at a new
+            # level (the cup removed after a shot, a drip tray, a re-tare).
+            # Without this the window freezes on the old level forever and the
+            # next shot is never detected.  Re-seed only from a candidate
+            # window that is itself stable, so a rising trend is never absorbed
+            # into the baseline.
+            self._drift.append(sample)
+            if len(self._drift) > self.baseline_samples:
+                self._drift.pop(0)
+            if len(self._drift) >= self.baseline_samples:
+                levels = [s.grams for s in self._drift]
+                if max(levels) - min(levels) <= self.stability_g:
+                    self._idle = list(self._drift)
+                    self._baseline = statistics.median(levels)
+                    self._drift = []
             return None
 
         self._samples.append(sample)
@@ -262,6 +321,16 @@ class ShotDetector:
                 previous = self._samples[-2] if len(self._samples) >= 2 else sample
                 mass = previous.grams - self._start_g
                 return self._finish(previous.ms, mass, "cup removed / weight drop")
+
+        if elapsed >= self.max_shot_ms:
+            # A reading that never settles (a drifting cup, a stuck sensor) must
+            # not leave the detector active forever: that keeps the on-device
+            # status in serving and nothing else can start.  Close it as an
+            # explicitly invalid shot so the caller still sees an audit event.
+            # Checked after the genuine ends so a real finish at the bound keeps
+            # its own reason.
+            mass = sample.grams - self._start_g
+            return self._finish(sample.ms, mass, "timeout", valid=False)
         return None
 
 
@@ -303,7 +372,14 @@ def parse_ble_weight(payload: bytes, kind: str) -> float | None:
         return parse_decent_weight(payload)
     if kind == "generic":
         return parse_gatt_weight(payload)
-    return parse_decent_weight(payload) or parse_gatt_weight(payload)
+    # ``auto``: try the Decent layout first, then the standard GATT one.  The
+    # check must be ``is not None``: a valid 0 g frame parses to ``0.0``, which
+    # is falsy, and an ``or`` would fall through and read the same bytes as an
+    # imperial GATT measurement (934.4 g for 03ce00000000b6).
+    decent = parse_decent_weight(payload)
+    if decent is not None:
+        return decent
+    return parse_gatt_weight(payload)
 
 
 def iter_replay(path: str | Path) -> Iterator[ScaleSample]:
@@ -338,14 +414,38 @@ def iter_openscale(host: str, *, port: int = 80, timeout: float = 6.0) -> Iterat
 class BleSource:
     """BLE source using optional ``bleak``; tests cover the parsers only."""
 
+    # A BLE scale notifies at 5-10 Hz and the consumer is a synchronous
+    # detector loop; a stalled consumer must not grow this queue until the
+    # host runs out of memory.  One minute of backlog is far more than the
+    # detector can use, and the newest sample is what matters.
+    QUEUE_MAX = 600
+
     def __init__(self, address: str, *, kind: str = "auto", scan_timeout: float = 10.0) -> None:
         self.address = address
         self.kind = kind
         self.scan_timeout = scan_timeout
-        self._queue: queue.Queue[ScaleSample | BaseException | None] = queue.Queue()
+        self._queue: queue.Queue[ScaleSample | BaseException | None] = queue.Queue(
+            maxsize=self.QUEUE_MAX
+        )
+        self._dropped = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_ms = 0.0
+
+    def _offer(self, item: ScaleSample | BaseException | None) -> None:
+        """Enqueue *item*, dropping the oldest sample when the queue is full."""
+
+        while True:
+            try:
+                self._queue.put_nowait(item)
+                return
+            except queue.Full:
+                try:
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    continue
+                if isinstance(item, ScaleSample):
+                    self._dropped += 1
 
     def _on_notify(self, _characteristic: Any, data: bytearray) -> None:
         grams = parse_ble_weight(bytes(data), self.kind)
@@ -355,7 +455,7 @@ class BleSource:
         if now <= self._last_ms:
             now = self._last_ms + 1.0
         self._last_ms = now
-        self._queue.put(ScaleSample(grams, now, source=f"ble-{self.kind}"))
+        self._offer(ScaleSample(grams, now, source=f"ble-{self.kind}"))
 
     async def _loop(self) -> None:
         try:
@@ -382,9 +482,11 @@ class BleSource:
         try:
             asyncio.run(self._loop())
         except BaseException as exc:  # noqa: BLE001 - forwarded to the consumer
-            self._queue.put(exc)
+            self._offer(exc)
         finally:
-            self._queue.put(None)
+            # Through _offer as well: a plain put() on a full queue would block
+            # here forever and the consumer would never see the sentinel.
+            self._offer(None)
 
     def samples(self) -> Iterator[ScaleSample]:
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -499,6 +601,26 @@ def _token_for(args: argparse.Namespace) -> str:
     )
 
 
+def _token_hint(args: argparse.Namespace) -> str:
+    """Best-effort secret for redacting a failure that reaches ``main()``.
+
+    ``_run`` knows the resolved token, but by the time an exception reaches
+    ``main`` that local is gone.  Use what the arguments already carry; the
+    ``token=``/``Bearer`` patterns inside :func:`redact` cover the rest.
+    """
+
+    token = getattr(args, "token", None)
+    if token:
+        return str(token)
+    path = getattr(args, "token_file", None)
+    if path:
+        try:
+            return Path(path).read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+    return ""
+
+
 def _run(args: argparse.Namespace) -> int:
     if args.preflight:
         token = _token_for(args)
@@ -532,6 +654,7 @@ def _run(args: argparse.Namespace) -> int:
         min_duration_ms=args.min_duration_ms,
         valid_min_ms=args.valid_min_ms,
         drop_threshold_g=args.drop_threshold_g,
+        max_shot_ms=args.max_shot_ms,
     )
     token = _token_for(args) if args.apply else ""
     for sample in _samples_for(args):
@@ -545,8 +668,12 @@ def _run(args: argparse.Namespace) -> int:
             group_head=args.group_head,
         )
         record: dict[str, Any] = {"shot": shot.as_dict(), "event": event}
+        # Print and flush the event *before* the write.  A failing transport
+        # must not hide what was about to be sent: the event line is the audit
+        # record (docs/GUIDE.md documents "printed before it is sent").
+        _print_record(record, as_json=args.json)
         if args.apply:
-            record["response"] = send_add_brew_event(
+            response = send_add_brew_event(
                 args.grinder,
                 token,
                 event,
@@ -555,25 +682,53 @@ def _run(args: argparse.Namespace) -> int:
                 timeout=args.timeout,
                 wss_port=args.wss_port,
             )
-        print(json.dumps(record, indent=2, sort_keys=True) if args.json else _human(record))
-        sys.stdout.flush()
+            _print_response(response, as_json=args.json, token=token)
+            refused = rejection_reason(response)
+            if refused:
+                # Loud on stderr, and non-zero: a rejected action must not look
+                # like a delivered one to a script or to the operator.
+                print(f"scale-bridge: the grinder refused AddBrewEvent: "
+                      f"{_redact(refused, token)}", file=sys.stderr)
+                return REJECTED_EXIT
         if args.once:
             return 0
     return 0
 
 
+def _print_record(record: Mapping[str, Any], *, as_json: bool) -> None:
+    """Emit the shot/event audit record and flush it immediately."""
+
+    print(json.dumps(record, indent=2, sort_keys=True) if as_json else _human(record))
+    sys.stdout.flush()
+
+
+def _print_response(response: Mapping[str, Any], *, as_json: bool,
+                    token: str = "") -> None:
+    """Emit the grinder's answer, after the event has been recorded.
+
+    The payload is the grinder's text, not ours: an error nested in it can
+    quote the request it refused, including a URI that carries ``?token=``.
+    Print the redacted form -- the README promise is that a token is never
+    printed, and "only our own messages" was exactly the gap.
+    """
+
+    if as_json:
+        text = json.dumps({"response": response}, indent=2, sort_keys=True)
+    else:
+        text = f"grinder: {json.dumps(response, sort_keys=True)}"
+    print(_redact(text, token))
+    sys.stdout.flush()
+
+
 def _human(record: Mapping[str, Any]) -> str:
     shot = record["shot"]
     event = record["event"]
-    lines = [
+    return "\n".join([
         f"shot: {shot['mass_g']:.1f} g in {shot['duration_ms'] / 1000.0:.1f} s "
         f"({'valid' if shot['valid'] else 'invalid'}; {shot['reason']})",
         f"event: brewWeightMg={event['brewWeightMg']} brewTimeMs={event['brewTimeMs']} "
         f"validity={event['validity']}",
-    ]
-    if "response" in record:
-        lines.append(f"grinder: {json.dumps(record['response'], sort_keys=True)}")
-    return "\n".join(lines)
+    ])
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -594,6 +749,8 @@ def build_parser() -> argparse.ArgumentParser:
     detect.add_argument("--min-duration-ms", type=float, default=3000.0)
     detect.add_argument("--valid-min-ms", type=float, default=15000.0)
     detect.add_argument("--drop-threshold-g", type=float, default=2.0)
+    detect.add_argument("--max-shot-ms", type=float, default=120_000.0,
+                        help="close an active shot as invalid (timeout) after this long")
     detect.add_argument("--once", action="store_true", help="exit after the first completed shot")
 
     grinder = parser.add_argument_group("grinder (only with --apply)")
@@ -634,8 +791,11 @@ def main(argv: list[str] | None = None) -> int:
         return _run(args)
     except KeyboardInterrupt:
         return 130
-    except (ValueError, RuntimeError, OpenScaleProtocolError) as exc:
-        print(f"scale-bridge: {exc}", file=sys.stderr)
+    except (ValueError, RuntimeError, OpenScaleProtocolError, OSError) as exc:
+        # OSError covers the transport and file paths that used to escape as a
+        # traceback; the text is redacted for the same reason every other
+        # message is.
+        print(f"scale-bridge: {_redact(exc, _token_hint(args))}", file=sys.stderr)
         return 2
 
 

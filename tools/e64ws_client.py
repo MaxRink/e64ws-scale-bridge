@@ -5,7 +5,10 @@ The optional dependency is websocket-client. The client deliberately verifies
 TLS by default. Because the supplied image uses a self-signed certificate,
 --insecure or --ca-file is required when the local certificate is not trusted.
 The token is accepted through an argument or obtained from the local login
-route; it is never printed by this program.
+route; it is never printed by this program.  It travels in the WSS URL query
+string, so every message goes through :func:`redact` before it is printed or
+turned into an exception: the query value and any ``Bearer`` header value are
+replaced with ``<redacted>``.
 """
 
 from __future__ import annotations
@@ -15,9 +18,11 @@ import base64
 import getpass
 import hashlib
 import json
+import re
 import secrets
 import ssl
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -38,6 +43,44 @@ except ModuleNotFoundError:  # pragma: no cover - package import path
         HAZARDOUS_ACTIONS,
         HAZARDOUS_DIRECT_COMMANDS,
     )
+
+
+REDACTED = "<redacted>"
+_BEARER_RE = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
+# Any Authorization header, not just the Bearer scheme: a peer that echoes
+# request headers does not have to use Bearer, and "Basic <base64>" is a
+# credential too.  Only the value is replaced, so a redacted JSON document
+# keeps its quotes and stays parseable.
+_AUTHORIZATION_RE = re.compile(
+    r"""(?i)(\bauthorization\b["']?\s*[:=]\s*["']?)([^\r\n,;{}"']+)"""
+)
+# Fail closed: after a token= key, hide the rest of the query string.  A token
+# may itself contain "&", and then "?token=alpha&bravo" used to leave the
+# "&bravo" tail of the secret in the log line.
+_TOKEN_QUERY_RE = re.compile(r"(?i)([?&](?:token|access_token)=)[^\s'\"#]+")
+
+
+def redact(value: object, secret: str = "") -> str:
+    """Return *value* safe for a log line.
+
+    The token travels in the request URI (``/?token=<secret>``), so it comes
+    back at us in text we do not control: a proxy or grinder refusal that
+    echoes the Request-URI in the response body, a peer that echoes request or
+    response headers, and any message that quotes such a body.  websocket-client
+    does *not* quote the URL itself on a failed handshake -- it quotes the
+    headers and the response body -- so that echo is the leak vector that
+    matters, and it is why redaction cannot be limited to "our own" messages.
+
+    The supplied secret is replaced literally first, then the ``token=`` query
+    form and any ``Bearer`` value are replaced as well.
+    """
+
+    text = str(value)
+    if secret:
+        text = text.replace(secret, REDACTED)
+    text = _TOKEN_QUERY_RE.sub(rf"\1{REDACTED}", text)
+    text = _AUTHORIZATION_RE.sub(rf"\1{REDACTED}", text)
+    return _BEARER_RE.sub(f"Bearer {REDACTED}", text)
 
 
 def _https_context(*, insecure: bool, ca_file: str | None) -> ssl.SSLContext:
@@ -173,11 +216,50 @@ def run_request(
         sslopt.update(cert_reqs=ssl.CERT_REQUIRED, ca_certs=ca_file)
     else:
         sslopt.update(cert_reqs=ssl.CERT_REQUIRED, check_hostname=True)
-    socket = websocket.create_connection(url, timeout=timeout, sslopt=sslopt)
     try:
-        socket.send(json.dumps(message, separators=(",", ":")))
+        socket = websocket.create_connection(url, timeout=timeout, sslopt=sslopt)
+    except Exception as exc:  # noqa: BLE001 - websocket-client raises many types
+        # A refused handshake raises with the peer's headers and response body,
+        # and the peer may echo the Request-URI -- which carries ?token= -- in
+        # that body. Redact before the text can reach a log or an exception;
+        # ``from None`` keeps the unredacted original out of the traceback
+        # chain.
+        raise RuntimeError(
+            redact(f"could not open the local WSS connection: {exc}", token)
+        ) from None
+    try:
+        try:
+            socket.send(json.dumps(message, separators=(",", ":")))
+        except Exception as exc:  # noqa: BLE001 - websocket-client raises many types
+            # A send can fail with the peer's text in the message too (a reset
+            # mid-frame, a closed socket object), so it is redacted like every
+            # other transport failure instead of escaping as an OSError that
+            # carries the token into a traceback.
+            raise RuntimeError(
+                redact(f"could not send the WSS request: {exc}", token)
+            ) from None
+        # The per-recv timeout alone bounds only a single read: a silent or
+        # chatty peer could keep the loop alive forever.  Bound the whole wait
+        # and turn a timeout into a message the CLI can report as exit 2.
+        deadline = time.monotonic() + timeout
         while True:
-            response = json.loads(socket.recv())
+            try:
+                raw = socket.recv()
+            except websocket.WebSocketTimeoutException:
+                raise RuntimeError(
+                    f"no WSS response from {host} within {timeout:g} s; "
+                    "the connection was closed, re-run to reconnect"
+                ) from None
+            except websocket.WebSocketException as exc:
+                raise RuntimeError(
+                    redact(f"WSS connection failed: {exc}", token)
+                ) from None
+            if time.monotonic() > deadline:
+                raise RuntimeError(
+                    f"no matching WSS response from {host} within {timeout:g} s; "
+                    "the connection was closed, re-run to reconnect"
+                )
+            response = json.loads(raw)
             if E64WSProtocol.matches_response(message, response):
                 return response
             if response == {"pong": True}:
@@ -263,17 +345,22 @@ def main(argv: list[str] | None = None) -> int:
         message = protocol.request(args.request, data)
     else:
         message = protocol.action(args.action, data, action_type=args.action_type)
-    response = run_request(
-        args.host,
-        token,
-        message,
-        insecure=args.insecure,
-        ca_file=args.ca_file,
-        timeout=args.timeout,
-        allow_hazardous=args.allow_hazardous,
-    )
-    json.dump(response, sys.stdout, indent=2, sort_keys=True)
-    sys.stdout.write("\n")
+    try:
+        response = run_request(
+            args.host,
+            token,
+            message,
+            insecure=args.insecure,
+            ca_file=args.ca_file,
+            timeout=args.timeout,
+            allow_hazardous=args.allow_hazardous,
+        )
+    except (RuntimeError, ValueError, OSError) as exc:
+        print(f"e64ws-client: {redact(exc, token)}", file=sys.stderr)
+        return 2
+    # The payload is the peer's text: a nested error can quote the request it
+    # refused, so it is redacted like every other message we print.
+    print(redact(json.dumps(response, indent=2, sort_keys=True), token))
     return 0
 
 

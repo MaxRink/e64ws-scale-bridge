@@ -9,20 +9,49 @@ fail before PHP is reached.
 This script makes one narrow, marked change:
 
 * exempt only ``/api/v2/*`` from the HTTP->HTTPS redirect;
-* rewrite the four exact Xenia paths to their ``index.php`` so the client does
+* rewrite the five exact Xenia paths to their ``index.php`` so the client does
   not have to follow a directory redirect;
 * leave every other HTTP path redirected to HTTPS.
 
-It is idempotent, keeps a vendor backup, and can restore it.  The installer
-runs ``lighttpd -t`` before restarting and restores the backup on failure.
+The exemption is a deliberate cleartext trade-off: everything under ``/api/v2/``
+(including the ``brewratio`` write and the ESP32 ``X-Scale-Token`` header) is
+readable and injectable on the LAN path.  It is accepted only for a trusted,
+isolated LAN; the E64 client cannot use TLS, so narrowing the exemption would
+break the M2M path.  See docs/REVIEW_FOLLOWUPS.md.
+
+It is idempotent and always snapshots the pre-edit file under a unique name
+next to ``--backup``.  The unpatched vendor config is the restore point and is
+refreshed whenever an edit starts from an unpatched file, so a firmware update
+that ships a new vendor config cannot leave ``--restore`` on a stale snapshot.
+Only the newest ``SNAPSHOT_KEEP`` snapshots are kept, and "newest" is by write
+time, not by name: the name is a whole-second stamp, so name order disagrees
+with reality as soon as two edits land in the same second.  On a filesystem
+whose clock is coarser than the edit rate every snapshot of a run can share one
+tick, and then write time cannot decide anything; the ``.N`` counter does, and
+it is compared as a **number** (``.10`` is newer than ``.9``) and only ever
+increases, so the tiebreak is right for any count of snapshots in one tick.
+
+``--restore`` validates the snapshot before it copies a byte: the restore point
+must be a complete lighttpd config, not the truncated file a power loss can
+leave behind.  Every copy -- the snapshot, the restore point and the live
+config -- is written to a sibling ``.tmp`` file, fsynced and renamed, so an
+interrupted write leaves the previous file intact instead of a half file that
+looks complete.  A refusal is loud and exits non-zero; the live config is not
+touched.  The installer runs ``lighttpd -t`` before restarting and restores the
+snapshot on failure.
+
+Exit codes: 0 ok, 2 missing config, 3 no vendor redirect block to patch,
+4 missing backup, 5 backup is not a complete config.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import sys
+import time
 from pathlib import Path
 
 BEGIN = "# BEGIN E64 scale bridge Xenia HTTP"
@@ -38,8 +67,14 @@ REDIRECT = re.compile(
 
 PATCH = f'''{BEGIN}
 # The E64 Xenia client is HTTP-only (RestClient::open(host, 80)). Exempt the
-# four local Xenia routes from the global HTTPS redirect and rewrite them to
+# five local Xenia routes from the global HTTPS redirect and rewrite them to
 # their index.php files so no directory redirect is needed.
+#
+# TRADE-OFF (deliberate, do not "fix" silently): this makes every /api/v2/
+# request plain HTTP on the LAN. POST /api/v2/brewratio therefore writes the
+# SYNC_BEVERAGE_WEIGHT/SYNC_FILTER pair in the clear, and /api/v2/ingest sends
+# its X-Scale-Token header in the clear. Only run this on a trusted, isolated
+# LAN and never expose port 80 to the internet. See docs/REVIEW_FOLLOWUPS.md.
 $HTTP["scheme"] == "http" {{
     $HTTP["url"] !~ "^/api/v2/" {{
         $HTTP["host"] =~ ".*" {{
@@ -51,6 +86,262 @@ $HTTP["url"] =~ "^/api/v2/(mako|machine|brewratio|scripts/execute|ingest)$" {{
     url.rewrite-once = ( "^/api/v2/(mako|machine|brewratio|scripts/execute|ingest)$" => "/api/v2/$1/index.php" )
 }}
 {END}'''
+
+
+def _fsync_directory(path: Path) -> None:
+    """Make the rename in *path* durable; best effort where unsupported."""
+
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
+def _atomic_copy(source: Path, destination: Path, *, preserve_times: bool = True) -> None:
+    """Copy *source* to *destination* so a crash cannot leave half a file.
+
+    The bytes go to a sibling ``.tmp`` file, are fsynced, and are renamed over
+    *destination*.  A power loss therefore leaves the previous file or the
+    complete new one -- never the truncated restore point that used to make
+    ``--restore`` brick lighttpd.
+
+    ``preserve_times=False`` keeps the permissions but not the timestamps, so
+    *destination* is dated when it was written.  A snapshot has to be: its age
+    is what retention sorts on, and inheriting the date of a config file that
+    shipped inside a firmware image would make a brand-new snapshot look older
+    than every other one.
+    """
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    tmp = destination.with_name(destination.name + ".tmp")
+    try:
+        with open(source, "rb") as src, open(tmp, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+            dst.flush()
+            os.fsync(dst.fileno())
+        if preserve_times:
+            shutil.copystat(source, tmp)
+        else:
+            shutil.copymode(source, tmp)
+        os.replace(tmp, destination)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    _fsync_directory(destination.parent)
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Replace *path* with *text* without ever exposing a partial file."""
+
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        shutil.copymode(path, tmp)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    _fsync_directory(path.parent)
+
+
+def validate_config_text(text: str) -> str | None:
+    """Return why *text* cannot be a complete lighttpd config, else ``None``.
+
+    Deliberately structural rather than a lighttpd parse: the device has no
+    lighttpd grammar in Python, and the question that has to be answered
+    before overwriting the live config is only "is this a whole config file?".
+    It catches the truncated restore point (a 39-byte file holding nothing but
+    the vendor comment line) and a garbage or empty backup.
+    """
+
+    if not text.strip():
+        return "the file is empty"
+    if "\x00" in text:
+        return "the file contains binary data"
+    # A truncated file usually dies inside a block, leaving a dangling brace.
+    if text.count("{") != text.count("}"):
+        return (
+            f"it has {text.count('{')} opening and {text.count('}')} closing braces, "
+            "so it was cut off"
+        )
+    if "$HTTP[" not in text and re.search(r"(?m)^\s*server\.", text) is None:
+        return "it holds no lighttpd directive ($HTTP[...] or server.*)"
+    return None
+
+
+# One snapshot per edit, never pruned, is a slow leak on a device whose /db is
+# small: keep the newest few for rollback evidence.
+SNAPSHOT_KEEP = 5
+
+
+# A snapshot name is ``<backup>.<YYYYmmddTHHMMSSZ>`` (what older versions of
+# this script wrote) or ``<backup>.<YYYYmmddTHHMMSSZ>.<n>``.  Matched from the
+# end, so a backup name that itself holds digits or a stamp cannot be mistaken
+# for the snapshot's own.
+SNAPSHOT_STAMP = re.compile(r"\.(\d{8}T\d{6}Z)(?:\.(\d+))?\Z")
+
+
+def _snapshot_age(path: Path) -> tuple[int, int, int, str]:
+    """Sort key for the snapshots: write time, then the name, all as numbers.
+
+    Retention used to sort by name, and the name is a whole-second UTC stamp
+    with a ``.N`` collision suffix that gets *reused* once a name has been
+    pruned.  Two edits in the same second therefore produced ``<base>``
+    (newest) and ``<base>.2`` (older), and name order put ``<base>`` first --
+    so the newest snapshot was deleted and an older one kept.  Age comes from
+    ``st_mtime_ns``, which ``snapshot()`` dates at write time, and it stays
+    primary: a snapshot written a minute later wins unless the filesystem
+    cannot tell the two apart.
+
+    The rest of the key only runs when ``st_mtime_ns`` ties, i.e. when the
+    filesystem's clock is coarser than the edit rate and every snapshot of a
+    run shares one tick.  Then the name is all the evidence left, and it is
+    compared as *numbers*, in this order:
+
+    * the stamp -- an int, ``20260101T000000Z`` -> ``20260101000000``.  Needed
+      because the name stamp is whole seconds while the stored mtime can be
+      coarser still (vfat rounds to two seconds), so one mtime tick can hold
+      two different stamps.  Comparing the counter first would then say the
+      snapshot written at 12:00:04.9 is newer than the one at 12:00:05.1 as
+      soon as the earlier second has more revisions.
+    * the counter -- an int, so ``.10`` is newer than ``.9``.  Comparing the
+      digits as text inverts every pair whose magnitudes differ, which kept
+      5,6,7,8,11 out of twelve same-tick edits: the newest revision deleted
+      while an older one survived.  It is ``max(existing) + 1`` (see
+      ``_reserve_snapshot_path()``), so it never goes backwards and always
+      agrees with write order within one stamp.
+    * the raw name -- only to keep the order *total* between two files that
+      are otherwise indistinguishable, so the pruning is deterministic and
+      independent of the order the glob returned.  It never decides which
+      snapshot is newest, because distinct names cannot tie on any of the
+      three numbers above and this only breaks a tie they leave.
+
+    A name with no stamp (anything this script did not write) sorts first and
+    is pruned first; a name with a stamp but no counter (``<base>``, written by
+    an older version) sorts before the numbered siblings of that same second.
+    """
+
+    try:
+        mtime_ns = path.stat().st_mtime_ns
+    except OSError:
+        # Vanished or unreadable: treat it as the oldest so it is pruned first.
+        return (-1, -1, -1, path.name)
+    match = SNAPSHOT_STAMP.search(path.name)
+    if match is None:
+        return (mtime_ns, -1, -1, path.name)
+    stamp = int(match.group(1).replace("T", "").replace("Z", ""))
+    counter = int(match.group(2)) if match.group(2) else 0
+    return (mtime_ns, stamp, counter, path.name)
+
+
+def prune_snapshots(backup: Path, *, keep: int = SNAPSHOT_KEEP,
+                    protect: Path | None = None) -> None:
+    """Keep the newest *keep* snapshots next to *backup*; drop the rest."""
+
+    if keep <= 0:
+        return
+    # *protect* is the snapshot just written and counts towards the budget.
+    room = keep - 1 if protect is not None else keep
+    snapshots = sorted(
+        (item for item in backup.parent.glob(backup.name + ".*")
+         if not item.name.endswith(".tmp") and item != protect),
+        key=_snapshot_age,
+    )
+    for stale in (snapshots[:-room] if room else snapshots):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+
+
+def _describe_snapshots(backup: Path) -> str:
+    """Name the newest sibling snapshot that does look complete, for the operator."""
+
+    usable = []
+    for candidate in sorted(backup.parent.glob(backup.name + ".*"), key=_snapshot_age):
+        if candidate.name.endswith(".tmp"):
+            continue
+        try:
+            text = candidate.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if validate_config_text(text) is None:
+            usable.append(candidate)
+    if not usable:
+        return ""
+    return (
+        f"\n       the newest complete snapshot exists: {usable[-1]}"
+        f"\n       re-run with --backup {usable[-1]}"
+    )
+
+
+def _reserve_snapshot_path(backup: Path) -> Path:
+    """Claim an unused snapshot name that sorts after every surviving one.
+
+    The UTC stamp is for the operator; the counter is what makes the *name*
+    agree with write order.  It is ``max(existing) + 1`` rather than the first
+    free number, so a pruned name is never handed out again while an older
+    sibling still carries a higher one -- the reuse that made name ordering
+    disagree with reality.
+
+    The name is claimed with ``O_CREAT | O_EXCL``, not with ``Path.exists()``.
+    Two patchers can run at once on the same unit (an install while a manual
+    ``--backup`` run is in flight); ``exists()`` only answers "was it there a
+    moment ago", so both picked ``.1``, both wrote ``.1.tmp``, and the loser
+    crashed with the other run's half-written file.  An exclusive create is a
+    decision the kernel arbitrates: the loser sees ``FileExistsError`` and
+    takes the next number.  The claim is an empty placeholder; ``snapshot()``
+    gives the name back if the copy fails, and renames the complete file over
+    it otherwise.
+    """
+
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    prefix = f"{backup.name}.{stamp}."
+    highest = 0
+    for item in backup.parent.glob(prefix + "*"):
+        suffix = item.name[len(prefix):]
+        if suffix.isdigit():
+            highest = max(highest, int(suffix))
+    index = highest + 1
+    while True:
+        candidate = backup.with_name(f"{prefix}{index}")
+        try:
+            descriptor = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            # A concurrent run took that name between the scan and here.
+            index += 1
+            continue
+        os.close(descriptor)
+        return candidate
+
+
+def snapshot(config: Path, backup: Path) -> Path:
+    """Copy the pre-edit config to a unique sibling of *backup*."""
+
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    candidate = _reserve_snapshot_path(backup)
+    try:
+        _atomic_copy(config, candidate, preserve_times=False)
+    except BaseException:
+        # Hand the reserved name back: an empty snapshot would count against
+        # SNAPSHOT_KEEP and could prune a complete one.
+        try:
+            candidate.unlink()
+        except OSError:
+            pass
+        raise
+    prune_snapshots(backup, protect=candidate)
+    print(f"snapshotted pre-edit config to {candidate}")
+    return candidate
 
 
 def patch(config: Path, backup: Path) -> int:
@@ -66,27 +357,49 @@ def patch(config: Path, backup: Path) -> int:
             count=1,
             flags=re.DOTALL,
         )
-        config.write_text(updated)
+        # Our own older block is not a vendor file: snapshot it for rollback
+        # evidence, but leave the canonical vendor restore point alone.
+        snapshot(config, backup)
+        _atomic_write_text(config, updated)
         print("updated existing lighttpd patch block")
         return 0
     patched, count = REDIRECT.subn(PATCH, text, count=1)
     if count != 1:
         print("error: vendor redirect block not found; refusing to patch", file=sys.stderr)
         return 3
-    if not backup.exists():
-        backup.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(config, backup)
-        print(f"backed up vendor config to {backup}")
-    config.write_text(patched)
+    # Always snapshot the pre-edit file, and make *this* snapshot the restore
+    # point: after a firmware update the file is a new vendor revision, so the
+    # backup from the previous revision is stale and must not be kept.
+    snapshot_path = snapshot(config, backup)
+    _atomic_copy(snapshot_path, backup)
+    print(f"recorded vendor restore point {backup}")
+    _atomic_write_text(config, patched)
     print("patched lighttpd HTTP redirect for /api/v2/")
     return 0
 
 
 def restore(config: Path, backup: Path) -> int:
-    if not backup.exists():
+    if not backup.is_file():
         print(f"error: backup {backup} not found", file=sys.stderr)
         return 4
-    shutil.copy2(backup, config)
+    try:
+        text = backup.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        print(f"error: cannot read backup {backup}: {exc}", file=sys.stderr)
+        return 5
+    problem = validate_config_text(text)
+    if problem is not None:
+        print(
+            f"error: refusing to restore {config} from {backup}: {problem}",
+            file=sys.stderr,
+        )
+        print(
+            "       the backup is not a complete lighttpd config; the live config "
+            "was not touched" + _describe_snapshots(backup),
+            file=sys.stderr,
+        )
+        return 5
+    _atomic_copy(backup, config)
     print(f"restored {config} from {backup}")
     return 0
 

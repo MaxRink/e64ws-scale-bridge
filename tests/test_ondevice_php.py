@@ -19,6 +19,11 @@ import urllib.request
 from pathlib import Path
 
 
+def now_ms() -> int:
+    """The 32-bit millisecond window the daemon and lib.php both use."""
+    return int(time.time() * 1000) % 2147483648
+
+
 def _request(
     base: str,
     method: str,
@@ -100,6 +105,9 @@ class OnDevicePhpTests(unittest.TestCase):
             path.unlink(missing_ok=True)
 
     def _state(self, **fields) -> None:
+        # The daemon stamps every write and heartbeats once a second, so a live
+        # state file is always fresh; only the staleness tests pass an old
+        # updated_ms on purpose.
         value = {
             "schema": 1,
             "source": "ws://hds.local:80/snapshot",
@@ -114,7 +122,7 @@ class OnDevicePhpTests(unittest.TestCase):
             "shot_count": 0,
             "reconnects": 1,
             "error": "",
-            "updated_ms": 0,
+            "updated_ms": now_ms(),
         }
         value.update(fields)
         self.state_path.write_text(json.dumps(value))
@@ -166,12 +174,11 @@ class OnDevicePhpTests(unittest.TestCase):
         self.assertEqual(serving["PU_SENS_FLOW_METER_VOLUME"], 12.5)
         self.assertEqual(serving["PU_SENS_FLOW_METER_FLOWRATE"], 1.2)
 
-        now = int(time.time() * 1000) % 2147483648
         self._state(
             phase="finishing",
             ma_status=4,
             extraction_status=2,
-            finishing_until_ms=now + 5000,
+            finishing_until_ms=now_ms() + 5000,
             last_shot={"duration_ms": 24600, "mass_g": 18.0, "valid": True, "reason": "stable"},
         )
         _, raw = _request(self.base, "GET", "/api/v2/mako")
@@ -182,10 +189,9 @@ class OnDevicePhpTests(unittest.TestCase):
         self.assertEqual(value["PU_SENS_FLOW_METER_VOLUME"], 18.0)
 
     def test_finishing_window_expires(self) -> None:
-        now = int(time.time() * 1000) % 2147483648
         self._state(
             phase="finishing",
-            finishing_until_ms=now - 1,
+            finishing_until_ms=now_ms() - 1,
             last_shot={"duration_ms": 24600, "mass_g": 18.0, "valid": True, "reason": "stable"},
         )
         _, raw = _request(self.base, "GET", "/api/v2/mako")
@@ -280,6 +286,64 @@ class OnDevicePhpTests(unittest.TestCase):
             headers={"X-Scale-Token": "test-token"},
         )
         self.assertEqual(status, 400)
+
+    def test_a_stale_wifi_state_does_not_report_serving(self) -> None:
+        """A dead daemon must not hold the HMI in serving forever.
+
+        Measured before the gate existed: a one-hour-old state file with
+        connected:false and no daemon still gave MA_STATUS 3 and
+        MA_EXTRACTION_STATUS 1 with a plausible shot.
+        """
+
+        self._state(
+            connected=False,
+            phase="serving",
+            ma_status=3,
+            extraction_status=1,
+            live_grams=17.4,
+            flow_g_s=1.3,
+            active_ms=4200,
+            updated_ms=now_ms() - 3_600_000,
+        )
+        status, raw = _request(self.base, "GET", "/api/v2/mako")
+        self.assertEqual(status, 200)
+        value = json.loads(raw)
+        self.assertEqual(value["MA_STATUS"], 1)
+        self.assertEqual(value["MA_EXTRACTION_STATUS"], 0)
+        self.assertEqual(value["REAL_EXTRACTION_TIME_MS"], 0)
+        self.assertEqual(value["PU_SENS_FLOW_METER_VOLUME"], 0)
+        self.assertEqual(value["PU_SENS_FLOW_METER_FLOWRATE"], 0)
+
+    def test_a_fresh_wifi_state_still_reports_serving(self) -> None:
+        # The guard on the guard: the gate must not hide a live daemon.
+        self._state(
+            phase="serving", ma_status=3, extraction_status=1,
+            live_grams=17.4, flow_g_s=1.3, active_ms=4200,
+        )
+        _, raw = _request(self.base, "GET", "/api/v2/mako")
+        value = json.loads(raw)
+        self.assertEqual(value["MA_STATUS"], 3)
+        self.assertEqual(value["MA_EXTRACTION_STATUS"], 1)
+        self.assertEqual(value["REAL_EXTRACTION_TIME_MS"], 4200)
+
+    def test_a_stale_finishing_window_is_not_reported(self) -> None:
+        self._state(
+            phase="finishing",
+            finishing_until_ms=now_ms() + 60_000,
+            last_shot={"duration_ms": 24600, "mass_g": 18.0, "valid": True,
+                       "reason": "stable"},
+            updated_ms=now_ms() - 3_600_000,
+        )
+        _, raw = _request(self.base, "GET", "/api/v2/mako")
+        value = json.loads(raw)
+        self.assertEqual(value["MA_STATUS"], 1)
+        self.assertEqual(value["REAL_EXTRACTION_TIME_MS"], 0)
+
+    def test_a_wifi_state_without_a_timestamp_is_not_trusted(self) -> None:
+        self._state(phase="serving", ma_status=3, extraction_status=1,
+                    live_grams=17.4, updated_ms=0)
+        _, raw = _request(self.base, "GET", "/api/v2/mako")
+        self.assertEqual(json.loads(raw)["MA_STATUS"], 1)
 
     def test_stale_esp_state_falls_back_to_wifi_daemon(self) -> None:
         self._state()
