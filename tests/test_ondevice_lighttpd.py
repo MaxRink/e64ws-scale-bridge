@@ -283,36 +283,33 @@ class RestoreValidationTests(unittest.TestCase):
         # cap is written as a value so this fails on the leak, not on a missing
         # constant.
         keep = 5
+        edits = keep + 4
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "lighttpd.conf"
             backup = Path(tmp) / "lighttpd.conf.vendor"
             # Deterministic, not load-dependent: the whole run happens inside
             # one frozen second, so every snapshot shares a stamp and retention
-            # has to fall back on the counter in the name.  Two edits that land
-            # in the same second used to be the *unlucky* case (the newest name
-            # was reused and sorted first, so the oldest revision was kept).
+            # has to fall back on the counter in the name.
             with _frozen_clock():
-                for index in range(keep + 4):
+                for index in range(edits):
                     config.write_text(VENDOR + f"# revision {index}\n")
                     self.assertEqual(patch(config, backup), 0)
-            snapshots = sorted(
-                item.name for item in Path(tmp).glob("lighttpd.conf.vendor.*")
-                if item.name != "lighttpd.conf.vendor"
-            )
-            self.assertEqual(len(snapshots), keep)
-            # Each snapshot holds the pre-edit file, so the kept window is the
-            # newest `keep` revisions (edits-keep .. edits-1).
-            edits = keep + 4
-            self.assertEqual(
-                [int(re.search(r"# revision (\d+)",
-                               (Path(tmp) / name).read_text()).group(1))
-                 for name in snapshots],
-                list(range(edits - keep, edits)),
-            )
-            # The bug this pins: with one frozen second the revisions kept were
-            # 2,3,4,5,7 -- the newest-but-one deleted while revision 2 survived.
-            self.assertIn("# revision %d" % (edits - 1),
-                          (Path(tmp) / snapshots[-1]).read_text())
+            # Count the directory, not the names this test remembers: handing a
+            # cleared name out again is legitimate (the number is only the
+            # coarse-clock tiebreak, write time is what ages a snapshot), so a
+            # recorded path can appear twice.
+            survivors = sorted(Path(tmp).glob("lighttpd.conf.vendor.*"), key=_revision)
+            self.assertEqual(len(survivors), keep)
+            # Newest by *write time*: this harness writes the revisions in
+            # increasing order, so the retained contents must be the last
+            # `keep` of them.  Sorting the survivors by name and comparing them
+            # to write order -- what this test used to do -- re-stated the
+            # name-order assumption the retention fix rejects, and failed a
+            # correct future change that reuses a low name spuriously.  The
+            # original defect is still caught: with the pre-fix `<base>` reuse
+            # it keeps revisions 2,3,4,5,8 instead of 4,5,6,7,8.
+            self.assertEqual(_written_revisions(survivors),
+                             list(range(edits - keep, edits)))
 
     def test_validate_accepts_a_complete_config(self) -> None:
         self.assertIsNone(validate_config_text(VENDOR))
