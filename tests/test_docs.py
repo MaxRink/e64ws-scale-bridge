@@ -39,6 +39,14 @@ REVIEW_ITEMS = (
     "partial config writes",
     "ble sample queue",
     "timeout shot",
+    # Found by the review of #2 and by the 2026-11-26 sweep.  The placeholder and
+    # the retention row are pinned by phrase because deleting either is exactly
+    # the kind of silent drop this tuple exists to prevent: the first is a defect
+    # nobody reproduces by hand, the second is a guarantee a reader would assume.
+    "snapshot placeholder",
+    "retention is a ceiling",
+    "dependency ceilings",
+    "python test count",
 )
 
 STATUS_MARKERS = (
