@@ -147,9 +147,14 @@ python3 -m unittest discover -s tests -v
 
 174 Python tests cover the Decent/generic parsers, shot detection, event units,
 the WSS client's timeout/redaction paths, the Xenia emulator routes, the
-on-device daemon, the lighttpd snapshot/restore patch and these docs. Fifteen
-of them exercise the on-device Xenia endpoints, WebUI page, ESP32 ingest and
-state freshness; they skip as a group when `php` is not on `PATH`. A further
+on-device daemon, the lighttpd snapshot/restore patch and these docs. **174 is
+what the suite collects; 159 is what it runs on a host without `php`**, and both
+numbers are meant literally: `python3 -m unittest discover -s tests` prints
+`Ran 159 tests ... OK (skipped=1)` here, and `Ran 174 tests ... OK` where `php`
+is on `PATH`. Fifteen of them exercise the on-device Xenia endpoints, WebUI page,
+ESP32 ingest and state freshness; they skip as a group when `php` is not on
+`PATH` — `tests/test_ondevice_php.py` raises one `SkipTest` in `setUpClass`, so
+the class contributes one skip and none of its 15 cases to `Ran`. A further
 set drives `install.sh`, `uninstall.sh` and the init script for real inside a
 container and skips when Docker is unavailable. `./tools/run_php_tests.sh` runs
 the fifteen against PHP 8.4 in Docker and
@@ -157,6 +162,13 @@ the fifteen against PHP 8.4 in Docker and
 18 g / 24.6 s replay produced `brewTimeMs=24600`, `brewWeightMg=18000`,
 `validity=true`, and `AddBrewEvent` returned `{"success": true}` in development
 mode.
+
+**CI runs, and it runs these.** `.github/workflows/ci.yml` has three jobs — the
+Python suite, the on-device PHP endpoints in a `php:8.4` container, and the
+uninstall script — and run `45885611005` on `main` (2026-11-26) took all three to
+`success` with every step executed. So unlike the research repository, a green
+result here is CI evidence as well as a local one; the collected/running
+distinction above is the only thing a reader has to keep in mind.
 
 ## Scope and limitations
 
