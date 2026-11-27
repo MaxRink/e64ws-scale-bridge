@@ -1,5 +1,10 @@
 # Live validation — 2026-11-18
 
+<!-- rename-pending -->
+> **Rename pending.** `mahlkoenig-grinder-research` is a proposed name for the
+> research repository whose report this file points at. Nothing has been renamed,
+> no rename is scheduled or approved, and the new name does not resolve yet.
+
 Status: **transport, login-gate and read-only state capture. `AddBrewEvent` was
 not sent to physical hardware.**
 
@@ -75,7 +80,7 @@ boundary for the write path.
 ## Evidence
 
 The full read-only report is in the research repository:
-`mahlkoenig-e64ws-local-research/docs/LIVE_VALIDATION_2026-11-18.md`. No token,
+`mahlkoenig-grinder-research/docs/LIVE_VALIDATION_2026-11-18.md`. No token,
 password, session cookie, serial number or MAC address is included there.
 
 ## Clean-token addendum (Owner password set)
