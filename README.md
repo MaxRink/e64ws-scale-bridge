@@ -1,5 +1,11 @@
 # Mahlkönig E64 WS scale bridge
 
+<!-- rename-pending -->
+> **Rename pending.** `mahlkoenig-grinder-research` and
+> `decaid-mahlkoenig-websocket-grinder-plugin` are proposed names for two other
+> repositories this file points at. Nothing has been renamed, no rename is
+> scheduled or approved, and neither new name resolves yet.
+
 A local, cloudless bridge that turns a third-party espresso scale into the brew
 event shape a Mahlkönig E64 WS accepts. It supports the **Half Decent Scale /
 OpenScale** over Wi-Fi, the **Decent / Half Decent BLE** service, the standard
@@ -132,10 +138,10 @@ time is still the physical A/B gate.
 A future ESP32 BLE-central firmware can feed the same HMI through the
 token-protected `/api/v2/ingest` endpoint; see
 [docs/ESP32_BLE_GATEWAY.md](docs/ESP32_BLE_GATEWAY.md). See [docs/ON_DEVICE_INSTALL.md](docs/ON_DEVICE_INSTALL.md) and the
-feasibility report [ON_DEVICE_SCALE_BRIDGE.md](https://github.com/MaxRink/mahlkoenig-e64ws-local-research/blob/main/docs/ON_DEVICE_SCALE_BRIDGE.md).
+feasibility report [ON_DEVICE_SCALE_BRIDGE.md](https://github.com/MaxRink/mahlkoenig-grinder-research/blob/main/docs/ON_DEVICE_SCALE_BRIDGE.md).
 
 The companion Decaid plugin (read-only grinder telemetry) is
-[MaxRink/decaid-e64ws-plugin](https://github.com/MaxRink/decaid-e64ws-plugin);
+[MaxRink/decaid-mahlkoenig-websocket-grinder-plugin](https://github.com/MaxRink/decaid-mahlkoenig-websocket-grinder-plugin);
 the assisted dial-in plugin is
 [MaxRink/decaid-assisted-dialin-plugin](https://github.com/MaxRink/decaid-assisted-dialin-plugin).
 
